@@ -16,7 +16,7 @@ This file tracks intentionally deferred product ideas so the MVP can stay focuse
 - Installable React/Vite PWA that is easy to debug in a desktop or mobile browser.
 - GPT-6 Luna through the TypeScript OpenAI Agents SDK, with Priority processing and medium reasoning.
 - Browser camera and uploaded-video frame sampling; no direct video model input.
-- Unobstructed portrait camera preview, with controls outside it. Findings, summaries, submitted frames, and usage counters appear in History.
+- Unobstructed portrait camera preview, with controls and compact live processing statistics outside it. Findings, summaries, and submitted frames appear in History, alongside usage counters.
 - No sound effects, shutter flash, or decorative gradients.
 - Optional natural-language find criteria in Settings; uncertain detections are not saved.
 - Value records can include retail price, active listings, and sold comparables.

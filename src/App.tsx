@@ -8,6 +8,7 @@ import {
   CircleDollarSign,
   Download,
   ExternalLink,
+  Gauge,
   History,
   ImageUp,
   LoaderCircle,
@@ -802,6 +803,17 @@ export default function App({ children }: { children?: React.ReactNode }) {
             <button className="settings-trigger" onClick={() => setSettingsOpen(true)} aria-label="Open settings">
               <Settings size={15} />
             </button>
+            <section className="stats-ribbon scan-stats" aria-label="Live processing statistics">
+              <div className="stat active-stat" title={`${inFlight} of 1 requests active`}>
+                {inFlight > 0 ? <LoaderCircle className="spin" size={12} /> : <Gauge size={12} />}
+                <strong>{inFlight}/1</strong>
+                <span>Active</span>
+              </div>
+              <Stat label="Frames" value={stats.framesProcessed} />
+              <Stat label="Items" value={stats.itemsIdentified} />
+              <Stat label="Searches" value={stats.searchesPerformed} />
+              <Stat label="Calls" value={stats.modelCalls} />
+            </section>
           </header>
           <section className={`camera-stage ${cameraOverlayVisible ? "has-camera-overlay" : ""}`}>
             <video ref={videoRef} autoPlay muted playsInline onPause={cameraInterrupted} onError={cameraInterrupted} onEnded={() => streamRef.current ? cameraInterrupted() : stopScan()} />

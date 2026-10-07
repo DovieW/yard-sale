@@ -73,6 +73,10 @@ button:focus-visible, a:focus-visible, summary:focus-visible, select:focus-visib
 .spin { animation: spin .8s linear infinite; }
 
 .stats-ribbon { display: flex; align-items: center; gap: 15px; }
+.scan-stats { grid-column: 1 / -1; flex-wrap: wrap; column-gap: clamp(8px, 2.5vw, 15px); row-gap: 6px; padding-top: 4px; }
+.scan-stats .stat strong { font-size: 14px; }
+.scan-stats .stat span { font-size: 10px; }
+.active-stat strong, .active-stat svg { color: var(--gold); }
 .stat { min-width: 0; display: inline-flex; align-items: baseline; gap: 4px; white-space: nowrap; }
 .stat strong { font: 700 13px/1 "Space Grotesk", sans-serif; }
 .stat span { color: rgba(255,255,255,.63); font-size: 9px; font-weight: 600; }

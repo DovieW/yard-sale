@@ -87,7 +87,8 @@ describe("scanner lifecycle", () => {
     const video = container.querySelector("video")!;
     const stream = video.srcObject;
     expect(video.closest(".camera-stage")?.querySelector("button")).toBeNull();
-    expect(screen.queryByRole("region", { name: "Live processing statistics" })).toBeNull();
+    expect(screen.getByRole("region", { name: "Live processing statistics" })).toBeTruthy();
+    expect(video.closest(".camera-stage")?.querySelector(".stats-ribbon")).toBeNull();
     await act(() => testRouter.navigate({ to: "/history" }));
     expect(track.stop).not.toHaveBeenCalled();
     expect(container.querySelector("video")).toBe(video);
@@ -103,9 +104,11 @@ describe("scanner lifecycle", () => {
     const snap = screen.getByRole("button", { name: "Take snapshot" });
     fireEvent.click(snap);
     await waitFor(() => expect(analyze).toHaveBeenCalledTimes(1));
+    expect(screen.getByText("1/1", { exact: true })).toBeTruthy();
     fireEvent.click(snap);
     expect(analyze).toHaveBeenCalledTimes(1);
     await act(async () => complete(Response.json(result)));
+    await screen.findByText("0/1", { exact: true });
     expect(screen.queryByText(result.summary)).toBeNull();
     await act(() => testRouter.navigate({ to: "/history" }));
     await screen.findByText(result.summary);

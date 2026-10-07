@@ -41,11 +41,11 @@ Camera capture requests 1920×1080 on initial open and after switching devices, 
 
 Scan and History keep the same mounted video element and camera stream. Live work pauses while the app is hidden and resumes on return. The camera is marked Ready only after fresh preview frames arrive; a five-second frame stall pauses capture and exposes a centered Restart camera action. Returning to the app reattaches/replays the stream, then reacquires the camera if frames still do not arrive. Camera Off exposes a centered Select camera button. Camera Off explicitly releases the stream. Live captures do not flash the screen. Source changes invalidate pending results, API errors pause live scanning, and every completed analysis has a visible summary, including empty or filtered results. Updates are announced in Settings and applied only on request.
 
-The camera preview is unobstructed: controls sit above and below it, while saved finds, the latest AI summary, the submitted-frame thumbnail, and usage statistics appear in History. Resolution details and Restart camera are in Settings; restart is also available in the camera selector. The app has no sound effects or shutter flash. Screens use solid backgrounds without decorative gradients.
+The camera preview is unobstructed: controls sit above and below it, with a compact strip above the preview showing active requests, frames, items, searches, and model calls. Saved finds, the latest AI summary, and the submitted-frame thumbnail appear in History, which also shows usage statistics. Resolution details and Restart camera are in Settings; restart is also available in the camera selector. The app has no sound effects or shutter flash. Screens use solid backgrounds without decorative gradients.
 
 ## Routes and state
 
-- `/scan` — camera, snapshots, and uploads
+- `/scan` — camera, snapshots, uploads, and live processing statistics
 - `/history` — saved inventory, latest AI summary, and usage statistics
 - `/finds/:itemId?from=scan|history` — shareable item detail modal with its originating view preserved
 - `/finds/:itemId/activity?from=scan|history` — the persisted agent activity for the item's latest frame
