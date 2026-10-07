@@ -45,12 +45,12 @@ The camera preview is unobstructed: controls sit above and below it, while saved
 
 ## Routes and state
 
-- `/scan` — camera, snapshots, uploads, and the live findings feed
-- `/history` — saved inventory
+- `/scan` — camera, snapshots, and uploads
+- `/history` — saved inventory, latest AI summary, and usage statistics
 - `/finds/:itemId?from=scan|history` — shareable item detail modal with its originating view preserved
 - `/finds/:itemId/activity?from=scan|history` — the persisted agent activity for the item's latest frame
 
-TanStack Query owns remote stats and inventory data. Camera streams, capture timers, in-flight frame work, and the current live feed remain local React state because they are ephemeral browser state.
+TanStack Query owns remote stats and inventory data. Camera streams, capture timers, in-flight frame work, and recent detections remain local React state because they are ephemeral browser state.
 
 ## Useful commands
 
@@ -74,7 +74,7 @@ Each frame starts one bounded agent run. The agent:
 6. Persists new or repeated detections atomically. Exact fingerprints are unique; agent-proposed matches are rejected when established brands or models conflict. Uncertain detections and invalid bounding boxes are not saved. Fuzzy fingerprint overlap alone does not merge objects.
 7. Stores a sanitized per-frame audit record containing prompts, ordered run items, tool calls and results, raw model responses, final structured output, and usage. API keys, raw base64 images, encrypted reasoning, and hidden reasoning content are excluded.
 
-The UI reports cumulative frames processed, items identified, searches performed, and underlying model calls. See [FEATURES.md](./FEATURES.md) for live-feed tracking, natural-language filters, eBay integration, and batch processing.
+History reports cumulative frames processed, items identified, searches performed, and underlying model calls. See [FEATURES.md](./FEATURES.md) for find tracking, natural-language filters, eBay integration, and batch processing.
 
 ## Cloud deployment
 
