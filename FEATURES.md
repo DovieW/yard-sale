@@ -18,7 +18,7 @@ This file tracks intentionally deferred product ideas so the MVP can stay focuse
 - Browser camera and uploaded-video frame sampling; no direct video model input.
 - Configurable parallel frame processing from 1–100 requests, defaulting to five and remembering the previous setting. Each request tracks its own cancellation and keeps its frame paired with the correct summary.
 - Unobstructed portrait camera preview, with controls and compact live processing statistics outside it. Findings, summaries, and submitted frames appear in History, alongside usage counters.
-- No sound effects, shutter flash, or decorative gradients.
+- Brief capture feedback inside the camera frame for manual snaps, suppressed in Live mode. Reduced motion uses a static outline; no sound effects or decorative gradients.
 - Optional natural-language find criteria in Settings; uncertain detections are not saved.
 - Value records can include retail price, active listings, and sold comparables.
 - Dedupe within the active scan and across historical scans.

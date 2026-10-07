@@ -291,7 +291,7 @@ describe("scanner lifecycle", () => {
     const { container } = await openApp();
     fireEvent.click(screen.getByRole("button", { name: "Start live scanning" }));
     await waitFor(() => expect(analyze).toHaveBeenCalledTimes(1));
-    expect(container.querySelector(".snapshot-flash")).toBeNull();
+    expect(container.querySelector(".snapshot-feedback")).toBeNull();
     visibility = "hidden";
     fireEvent(document, new Event("visibilitychange"));
     track.readyState = "ended";

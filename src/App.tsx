@@ -132,6 +132,7 @@ export default function App({ children }: { children?: React.ReactNode }) {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const sessionIdRef = useRef<string | null>(null);
   const [scanning, setScanning] = useState(false);
+  const [snapshotFeedback, setSnapshotFeedback] = useState<number | null>(null);
   const [inFlight, setInFlight] = useState(0);
   const [liveItems, setLiveItems] = useState<DetectedItem[]>([]);
   const [selectedItem, setSelectedItem] = useState<DetectedItem | null>(null);
@@ -227,6 +228,12 @@ export default function App({ children }: { children?: React.ReactNode }) {
   useEffect(() => {
     if (cameraChooserOpen) cameraChooserRef.current?.showModal();
   }, [cameraChooserOpen]);
+
+  useEffect(() => {
+    if (snapshotFeedback === null) return;
+    const timer = window.setTimeout(() => setSnapshotFeedback(null), 320);
+    return () => window.clearTimeout(timer);
+  }, [snapshotFeedback]);
 
   useEffect(() => {
     if (requestStartedAt === null) { setElapsedSeconds(0); return; }
@@ -403,6 +410,8 @@ export default function App({ children }: { children?: React.ReactNode }) {
         canvas.width = 0;
         canvas.height = 0;
         if (!blob) throw new Error("The camera frame could not be captured.");
+        if (!scanWorkRef.current.isCurrent(token)) return;
+        if (manual && !scanWantedRef.current) setSnapshotFeedback(token);
         handedOff = true;
         await submitBlob(activeSessionId, blob, token);
       } catch (captureError) {
@@ -548,6 +557,7 @@ export default function App({ children }: { children?: React.ReactNode }) {
 
   const startLiveScan = (activeSessionId: string) => {
     pauseScan();
+    setSnapshotFeedback(null);
     scanWantedRef.current = true;
     setScanning(true);
     const capture = () => {
@@ -708,6 +718,7 @@ export default function App({ children }: { children?: React.ReactNode }) {
 
   function stopMedia() {
     stopScan();
+    setSnapshotFeedback(null);
     cameraOperationRef.current += 1;
     cameraWantedRef.current = false;
     openingCameraRef.current = null;
@@ -879,6 +890,9 @@ export default function App({ children }: { children?: React.ReactNode }) {
           <section className={`camera-stage ${cameraOverlayVisible ? "has-camera-overlay" : ""}`}>
             <video ref={videoRef} autoPlay muted playsInline onPause={cameraInterrupted} onError={cameraInterrupted} onEnded={() => streamRef.current ? cameraInterrupted() : stopScan()} />
             {stillPreviewUrl && <img className="still-preview" src={stillPreviewUrl} alt="Uploaded frame" />}
+            {snapshotFeedback !== null && !scanning && !cameraOverlayVisible && (
+              <div key={snapshotFeedback} className="snapshot-feedback" aria-hidden="true" />
+            )}
             {cameraOverlayVisible && (
               <div className="camera-empty" aria-label="Camera controls">
                 <div className="reticle" aria-hidden="true"><ScanLine size={44} /></div>
