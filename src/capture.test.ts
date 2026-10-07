@@ -16,14 +16,43 @@ describe("full-frame capture", () => {
 describe("scan work", () => {
   it("blocks overlapping captures, including when a replaced source is still pending", () => {
     const work = new ScanWork();
-    const first = work.acquire()!;
-    expect(work.acquire()).toBeNull();
+    const first = work.acquire(1)!;
+    expect(work.acquire(1)).toBeNull();
     work.invalidate();
     expect(work.isCurrent(first)).toBe(false);
-    expect(work.acquire()).toBeNull();
-    work.release();
-    const next = work.acquire()!;
+    expect(work.acquire(1)).toBeNull();
+    work.release(first);
+    const next = work.acquire(1)!;
     expect(work.isCurrent(next)).toBe(true);
     expect(next).not.toBe(first);
+  });
+  it("releases only the completed request's slot when parallel work finishes out of order", () => {
+    const work = new ScanWork();
+    const first = work.acquire(2)!;
+    const second = work.acquire(2)!;
+    expect(work.acquire(2)).toBeNull();
+    work.release(second);
+    const third = work.acquire(2)!;
+    work.release(second);
+    expect(work.acquire(2)).toBeNull();
+    expect(work.isCurrent(first)).toBe(true);
+    expect(work.isCurrent(third)).toBe(true);
+    work.invalidate();
+    work.release(first);
+    const replacement = work.acquire(2)!;
+    work.release(first);
+    expect(work.acquire(2)).toBeNull();
+    expect(work.isCurrent(third)).toBe(false);
+    expect(work.isCurrent(replacement)).toBe(true);
+  });
+  it("drains existing work before admitting a request under a lower limit", () => {
+    const work = new ScanWork();
+    const first = work.acquire(2)!;
+    const second = work.acquire(2)!;
+    expect(work.acquire(1)).toBeNull();
+    work.release(first);
+    expect(work.acquire(1)).toBeNull();
+    work.release(second);
+    expect(work.acquire(1)).not.toBeNull();
   });
 });

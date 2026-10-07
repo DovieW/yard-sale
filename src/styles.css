@@ -281,6 +281,7 @@ button:focus-visible, a:focus-visible, summary:focus-visible, select:focus-visib
 button:disabled { opacity: .5; cursor: wait; }
 .scan-feedback { width: min(1180px,100%); display: flex; align-items: start; gap: 10px; margin: 0 auto 20px; padding: 14px; color: #f7f7f2; background: #171a17; border: 1px solid #373c35; border-radius: 15px; font-size: 12px; }
 .scan-feedback p { margin: 0; line-height: 1.5; }
+.scan-feedback .scan-progress { margin-top: 6px; color: #b1b7aa; }
 .scan-feedback > div { min-width: 0; }
 .last-frame-button { flex: 0 0 54px; padding: 0; color: #e1e2d9; background: transparent; border: 0; font-size: 9px; cursor: pointer; }
 .last-frame-button img { display: block; width: 54px; height: 42px; object-fit: contain; background: #080a08; border-radius: 5px; margin-bottom: 4px; }

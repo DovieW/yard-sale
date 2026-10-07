@@ -26,7 +26,7 @@ import type { AgentRunHistory, AnalysisResponse, DetectedItem, HistoryPage, Stat
 import { cameraConstraints, cameraLabel, enableContinuousFocus } from "./camera";
 import { watchCameraPreview, type CameraPreview } from "./camera-preview";
 import { captureDimensions, waitForVideoReady } from "./capture";
-import { ScanWork } from "./scan-work";
+import { DEFAULT_MAX_CONCURRENT_FRAMES, MAX_CONCURRENT_FRAMES_SETTING, mergeProcessingStats, ScanWork } from "./scan-work";
 import { ApiError, readApiResponse } from "./api";
 import { APP_UPDATE_EVENT, installAppUpdate, updateAvailable } from "./app-updates";
 
@@ -38,6 +38,7 @@ const EMPTY_STATS: Stats = {
   lastUpdated: null,
 };
 const EMPTY_ITEMS: DetectedItem[] = [];
+const CONCURRENCY_STORAGE_KEY = "yard-sale-max-concurrent-frames";
 const FIND_CRITERIA_STORAGE_KEY = "yard-sale-find-criteria";
 const FIND_CRITERIA_PRESETS = [
   { label: "Vintage tees", value: "Vintage band tees worth more than $40" },
@@ -103,7 +104,6 @@ async function deleteAllFindsRequest(): Promise<void> {
 
 export default function App({ children }: { children?: React.ReactNode }) {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const cameraPreviewRef = useRef<CameraPreview | null>(null);
   const restoringCameraRef = useRef<Promise<string> | null>(null);
@@ -111,9 +111,10 @@ export default function App({ children }: { children?: React.ReactNode }) {
   const objectUrlRef = useRef<string | null>(null);
   const intervalRef = useRef<number | null>(null);
   const firstCaptureRef = useRef<number | null>(null);
-  const inFlightRef = useRef(0);
   const scanWorkRef = useRef(new ScanWork());
-  const requestRef = useRef<AbortController | null>(null);
+  const requestRef = useRef(new Map<number, { controller: AbortController; startedAt: number }>());
+  const latestSubmissionRef = useRef(0);
+  const latestFeedbackRef = useRef(0);
   const cameraOperationRef = useRef(0);
   const openingCameraRef = useRef<Promise<string> | null>(null);
   const cameraWantedRef = useRef(false);
@@ -141,6 +142,12 @@ export default function App({ children }: { children?: React.ReactNode }) {
   const [selectedCameraId, setSelectedCameraId] = useState("off");
   const [stillPreviewUrl, setStillPreviewUrl] = useState<string | null>(null);
   const [scanIntervalSeconds, setScanIntervalSeconds] = useState(4);
+  const [maxConcurrentFrames, setMaxConcurrentFrames] = useState(() => {
+    const saved = Number(window.localStorage.getItem(CONCURRENCY_STORAGE_KEY));
+    return Number.isInteger(saved) && saved >= 1 && saved <= MAX_CONCURRENT_FRAMES_SETTING
+      ? saved : DEFAULT_MAX_CONCURRENT_FRAMES;
+  });
+  const maxConcurrentFramesRef = useRef(maxConcurrentFrames);
   const [cameraState, setCameraState] = useState<"off" | "opening" | "ready" | "interrupted">("off");
   const cameraStateRef = useRef(cameraState);
   cameraStateRef.current = cameraState;
@@ -173,7 +180,11 @@ export default function App({ children }: { children?: React.ReactNode }) {
     : "scan";
   const viewRef = useRef(view);
   viewRef.current = view;
-  const { data: stats = EMPTY_STATS } = useQuery({ queryKey: ["stats"], queryFn: fetchStats });
+  const { data: stats = EMPTY_STATS } = useQuery({
+    queryKey: ["stats"],
+    queryFn: fetchStats,
+    structuralSharing: (previous, incoming) => mergeProcessingStats((previous as Stats | undefined) ?? EMPTY_STATS, incoming as Stats),
+  });
   const history = useHistory(debouncedSearch, view === "history");
   const savedFinds = useHistory("", settingsOpen);
   const historyItems = useMemo(() =>
@@ -276,26 +287,53 @@ export default function App({ children }: { children?: React.ReactNode }) {
     return () => navigator.mediaDevices?.removeEventListener("devicechange", refresh);
   }, [refreshCameras]);
 
+  const updateActiveRequests = useCallback(() => {
+    const active = [...requestRef.current].filter(([token]) => scanWorkRef.current.isCurrent(token));
+    setInFlight(active.length);
+    setRequestStartedAt(active.length ? Math.min(...active.map(([, request]) => request.startedAt)) : null);
+  }, []);
+
+  const reserveAnalysis = useCallback(() => {
+    const token = scanWorkRef.current.acquire(maxConcurrentFramesRef.current);
+    if (token !== null) {
+      requestRef.current.set(token, { controller: new AbortController(), startedAt: Date.now() });
+      updateActiveRequests();
+      setError(null);
+    }
+    return token;
+  }, [updateActiveRequests]);
+
+  const finishAnalysis = useCallback((token: number) => {
+    requestRef.current.delete(token);
+    scanWorkRef.current.release(token);
+    updateActiveRequests();
+  }, [updateActiveRequests]);
+
+  const showAnalyzedFrame = useCallback((blob: Blob) => {
+    if (lastFrameUrlRef.current) URL.revokeObjectURL(lastFrameUrlRef.current);
+    lastFrameUrlRef.current = URL.createObjectURL(blob);
+    setLastFrameUrl(lastFrameUrlRef.current);
+  }, []);
+
   const submitBlob = useCallback(
     async (activeSessionId: string, blob: Blob, reservation?: number) => {
-      const token = reservation ?? scanWorkRef.current.acquire();
+      const token = reservation ?? reserveAnalysis();
       if (token === null) {
-        setScanMessage("Still analyzing the last frame. The next frame will follow when it finishes.");
+        if (latestFeedbackRef.current === 0) setScanMessage(`All ${maxConcurrentFramesRef.current} analysis slots are busy. The next frame will follow when one finishes.`);
         return;
       }
-      if (!scanWorkRef.current.isCurrent(token)) { scanWorkRef.current.release(); return; }
-      inFlightRef.current += 1;
-      setInFlight(inFlightRef.current);
-      setRequestStartedAt(Date.now());
-      setScanMessage("Identifying objects and checking values…");
-      setError(null);
-      if (lastFrameUrlRef.current) URL.revokeObjectURL(lastFrameUrlRef.current);
-      lastFrameUrlRef.current = URL.createObjectURL(blob);
-      setLastFrameUrl(lastFrameUrlRef.current);
-      const controller = new AbortController();
-      requestRef.current = controller;
+      const request = requestRef.current.get(token);
+      if (!request || !scanWorkRef.current.isCurrent(token)) { finishAnalysis(token); return; }
+      const { controller } = request;
       const timeout = window.setTimeout(() => controller.abort("timeout"), 90_000);
       try {
+        if (token > latestSubmissionRef.current) {
+          latestSubmissionRef.current = token;
+          if (latestFeedbackRef.current === 0) {
+            setScanMessage("Identifying objects and checking values…");
+            showAnalyzedFrame(blob);
+          }
+        }
         const form = new FormData();
         form.set("sessionId", activeSessionId);
         form.set("capturedAt", new Date().toISOString());
@@ -305,13 +343,16 @@ export default function App({ children }: { children?: React.ReactNode }) {
         const result = await readApiResponse<AnalysisResponse>(response);
         if (!scanWorkRef.current.isCurrent(token)) return;
         queryClient.setQueryData(["stats"], result.stats);
-        setScanMessage(result.summary || (result.items.length ? `Identified ${result.items.length} object${result.items.length === 1 ? "" : "s"}.` : "No clear objects found. Move closer, hold steady, and try Snap."));
+        if (token > latestFeedbackRef.current) {
+          latestFeedbackRef.current = token;
+          showAnalyzedFrame(blob);
+          setScanMessage(result.summary || (result.items.length ? `Identified ${result.items.length} object${result.items.length === 1 ? "" : "s"}.` : "No clear objects found. Move closer, hold steady, and try Snap."));
+        }
         if (result.items.length > 0) {
           streamQueueRef.current.push(...result.items);
           startItemStream();
           void refreshHistory();
         }
-        setError(null);
       } catch (frameError) {
         if (!scanWorkRef.current.isCurrent(token)) return;
         stopScan();
@@ -319,27 +360,26 @@ export default function App({ children }: { children?: React.ReactNode }) {
           ? "Analysis timed out. Live scanning is paused; try a clear, steady snapshot."
           : frameError instanceof Error ? frameError.message : "Frame analysis failed";
         setError(message);
-        setScanMessage(frameError instanceof ApiError && frameError.status === 429 ? "Usage limit reached. Scanning paused." : "Analysis failed. Try Snap again when ready.");
+        if (token > latestFeedbackRef.current) {
+          latestFeedbackRef.current = token;
+          showAnalyzedFrame(blob);
+          setScanMessage(frameError instanceof ApiError && frameError.status === 429 ? "Usage limit reached. Scanning paused." : "Analysis failed. Try Snap again when ready.");
+        }
       } finally {
         window.clearTimeout(timeout);
-        if (requestRef.current === controller) requestRef.current = null;
-        inFlightRef.current -= 1;
-        setInFlight(inFlightRef.current);
-        setRequestStartedAt(null);
-        scanWorkRef.current.release();
+        finishAnalysis(token);
       }
     },
-    [queryClient, refreshHistory, startItemStream],
+    [queryClient, refreshHistory, startItemStream, reserveAnalysis, finishAnalysis, showAnalyzedFrame],
   );
 
   const submitFrame = useCallback(
     async (activeSessionId: string, manual = false) => {
       const video = videoRef.current;
-      const canvas = canvasRef.current;
-      if (!video || !canvas) throw new Error("The camera preview is unavailable.");
-      const token = scanWorkRef.current.acquire();
+      if (!video) throw new Error("The camera preview is unavailable.");
+      const token = reserveAnalysis();
       if (token === null) {
-        if (manual) setScanMessage("Still analyzing the last frame. Please wait before taking another snapshot.");
+        if (manual && latestFeedbackRef.current === 0) setScanMessage(`All ${maxConcurrentFramesRef.current} analysis slots are busy. Please wait for one to finish.`);
         return;
       }
       let handedOff = false;
@@ -352,20 +392,26 @@ export default function App({ children }: { children?: React.ReactNode }) {
         if (!manual && video.currentTime === lastVideoTimeRef.current) return;
         lastVideoTimeRef.current = video.currentTime;
         const dimensions = captureDimensions(video.videoWidth, video.videoHeight);
+        const canvas = document.createElement("canvas");
         canvas.width = dimensions.width;
         canvas.height = dimensions.height;
         const context = canvas.getContext("2d");
         if (!context) throw new Error("The image canvas is unavailable.");
         context.drawImage(video, 0, 0, canvas.width, canvas.height);
         const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.9));
+        // Keep the encoded frame, without retaining a full bitmap while AI runs.
+        canvas.width = 0;
+        canvas.height = 0;
         if (!blob) throw new Error("The camera frame could not be captured.");
         handedOff = true;
         await submitBlob(activeSessionId, blob, token);
+      } catch (captureError) {
+        if (scanWorkRef.current.isCurrent(token)) throw captureError;
       } finally {
-        if (!handedOff) scanWorkRef.current.release();
+        if (!handedOff) finishAnalysis(token);
       }
     },
-    [submitBlob],
+    [submitBlob, reserveAnalysis, finishAnalysis],
   );
 
   const beginSession = useCallback(
@@ -418,7 +464,7 @@ export default function App({ children }: { children?: React.ReactNode }) {
         isVisible: () => document.visibilityState === "visible" && viewRef.current === "scan",
         onReady: () => {
           if (operation !== cameraOperationRef.current || openingCameraRef.current || restoringCameraRef.current) return;
-          if (cameraStateRef.current === "interrupted") setScanMessage("Camera recovered. Tap Snap or Live to continue.");
+          if (cameraStateRef.current === "interrupted" && latestFeedbackRef.current === 0) setScanMessage("Camera recovered. Tap Snap or Live to continue.");
           setCameraState("ready");
         },
         onInterrupted: () => {
@@ -477,7 +523,7 @@ export default function App({ children }: { children?: React.ReactNode }) {
       if (stream?.getVideoTracks().some((track) => track.readyState === "live") && source === "camera" && activeSessionId && video && preview) {
         if (preview.isHealthy()) return activeSessionId;
         setCameraState("opening");
-        setScanMessage("Reconnecting camera…");
+        if (latestFeedbackRef.current === 0) setScanMessage("Reconnecting camera…");
         preview.reset();
         try {
           if (video.srcObject !== stream) video.srcObject = stream;
@@ -485,7 +531,7 @@ export default function App({ children }: { children?: React.ReactNode }) {
           await preview.waitForFrame(3_000);
           if (operation !== cameraOperationRef.current) throw new CameraChangedError();
           setCameraState("ready");
-          setScanMessage("Camera ready. Hold steady and tap Snap, or start Live.");
+          if (latestFeedbackRef.current === 0) setScanMessage("Camera ready. Hold steady and tap Snap, or start Live.");
           return activeSessionId;
         } catch {
           if (operation !== cameraOperationRef.current) throw new CameraChangedError();
@@ -524,6 +570,13 @@ export default function App({ children }: { children?: React.ReactNode }) {
     setScanIntervalSeconds(seconds);
     if (!scanning || !sessionId) return;
     startLiveScan(sessionId);
+  };
+
+  const changeConcurrentProcessing = (limit: number) => {
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_CONCURRENT_FRAMES_SETTING) return;
+    maxConcurrentFramesRef.current = limit;
+    setMaxConcurrentFrames(limit);
+    window.localStorage.setItem(CONCURRENCY_STORAGE_KEY, String(limit));
   };
 
   const toggleLiveScan = async () => {
@@ -610,8 +663,7 @@ export default function App({ children }: { children?: React.ReactNode }) {
       image.src = url;
       await image.decode();
       if (operation !== cameraOperationRef.current) return;
-      const canvas = canvasRef.current;
-      if (!canvas) throw new Error("Image canvas is unavailable.");
+      const canvas = document.createElement("canvas");
       const dimensions = captureDimensions(image.naturalWidth, image.naturalHeight);
       canvas.width = dimensions.width;
       canvas.height = dimensions.height;
@@ -619,6 +671,8 @@ export default function App({ children }: { children?: React.ReactNode }) {
       if (!context) throw new Error("Image canvas is unavailable.");
       context.drawImage(image, 0, 0, canvas.width, canvas.height);
       const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.9));
+      canvas.width = 0;
+      canvas.height = 0;
       if (!blob) throw new Error("The selected image could not be prepared.");
       if (operation !== cameraOperationRef.current) return;
       setSourceLabel(file.name);
@@ -644,7 +698,7 @@ export default function App({ children }: { children?: React.ReactNode }) {
       || document.visibilityState !== "visible" || viewRef.current !== "scan") return;
     pauseScan();
     setCameraState("interrupted");
-    setScanMessage("Camera preview stopped. Tap Restart camera to reconnect.");
+    if (latestFeedbackRef.current === 0) setScanMessage("Camera preview stopped. Tap Restart camera to reconnect.");
   }
 
   const restartCamera = () => {
@@ -664,7 +718,14 @@ export default function App({ children }: { children?: React.ReactNode }) {
     sessionIdRef.current = null;
     setSessionId(null);
     scanWorkRef.current.invalidate();
-    requestRef.current?.abort("source changed");
+    for (const request of requestRef.current.values()) request.controller.abort("source changed");
+    updateActiveRequests();
+    latestSubmissionRef.current = 0;
+    latestFeedbackRef.current = 0;
+    if (lastFrameUrlRef.current) URL.revokeObjectURL(lastFrameUrlRef.current);
+    lastFrameUrlRef.current = null;
+    setLastFrameUrl(null);
+    setFramePreviewOpen(false);
     streamQueueRef.current = [];
     if (streamTimerRef.current !== null) window.clearTimeout(streamTimerRef.current);
     streamTimerRef.current = null;
@@ -804,9 +865,9 @@ export default function App({ children }: { children?: React.ReactNode }) {
               <Settings size={15} />
             </button>
             <section className="stats-ribbon scan-stats" aria-label="Live processing statistics">
-              <div className="stat active-stat" title={`${inFlight} of 1 requests active`}>
+              <div className="stat active-stat" title={`${inFlight} requests active; concurrency limit ${maxConcurrentFrames}`}>
                 {inFlight > 0 ? <LoaderCircle className="spin" size={12} /> : <Gauge size={12} />}
-                <strong>{inFlight}/1</strong>
+                <strong>{inFlight}/{maxConcurrentFrames}</strong>
                 <span>Active</span>
               </div>
               <Stat label="Frames" value={stats.framesProcessed} />
@@ -829,7 +890,6 @@ export default function App({ children }: { children?: React.ReactNode }) {
                   </> : <button className="camera-open-button" onClick={() => setCameraChooserOpen(true)}><Camera size={18} /> Select camera</button>}
               </div>
             )}
-            <canvas ref={canvasRef} hidden />
           </section>
           {error && <div className="error-banner" role="alert">
             <span>{error}</span>
@@ -864,7 +924,8 @@ export default function App({ children }: { children?: React.ReactNode }) {
               <span>AI frame</span>
             </button>}
             <div>
-              <p role="status">{inFlight > 0 ? `Analyzing… ${elapsedSeconds}s${elapsedSeconds >= 10 ? " · Checking sources can take a little longer." : ""}` : scanMessage}</p>
+              <p role="status">{scanMessage}</p>
+              {inFlight > 0 && <p className="scan-progress">Analyzing {inFlight} frame{inFlight === 1 ? "" : "s"}… {elapsedSeconds}s{elapsedSeconds >= 10 ? " · Checking sources can take a little longer." : ""}</p>}
               {findCriteria && <button className="active-filter" onClick={() => updateFindCriteria("")} title="Clear the active filter">Filter: {findCriteria} <X size={12} /></button>}
             </div>
           </section>}
@@ -912,7 +973,7 @@ export default function App({ children }: { children?: React.ReactNode }) {
             {scanning ? <Square size={18} fill="currentColor" /> : <ScanLine size={20} />}
             <span>{scanning ? "Stop" : "Live"}</span>
           </button>
-          <button className="dock-action snapshot-action" disabled={cameraState === "opening" || inFlight > 0} onClick={() => void takeSnapshot()} aria-label="Take snapshot">
+          <button className="dock-action snapshot-action" disabled={cameraState === "opening" || inFlight >= maxConcurrentFrames} onClick={() => void takeSnapshot()} aria-label="Take snapshot">
             <Camera size={22} />
             <span>Snap</span>
           </button>
@@ -995,7 +1056,16 @@ export default function App({ children }: { children?: React.ReactNode }) {
                   {findCriteria && <button type="button" onClick={() => updateFindCriteria("")}>Clear</button>}
                 </div>
               </div>
-              <p className="settings-note">Frames run one at a time, so answers stay in order. Live pauses while the app is in the background. The portrait preview fills your screen; the AI receives the full frame.</p>
+              <p className="settings-note">Frames can run in parallel. Live pauses while the app is in the background. The portrait preview fills your screen; the AI receives the full frame.</p>
+              <div className="settings-range">
+                <label htmlFor="concurrent-processing">
+                  <span>Concurrent processing</span>
+                  <strong>{maxConcurrentFrames}</strong>
+                </label>
+                <input id="concurrent-processing" type="range" min="1" max={MAX_CONCURRENT_FRAMES_SETTING} step="1"
+                  value={maxConcurrentFrames} onChange={(event) => changeConcurrentProcessing(Number(event.target.value))} />
+                <div><span>1</span><span>{MAX_CONCURRENT_FRAMES_SETTING}</span></div>
+              </div>
               <div className="settings-range">
                 <label htmlFor="scan-frequency">
                   <span>Live scan frequency</span>

@@ -20,4 +20,4 @@ The runtime implementation is in `worker/agent.ts`. Its core contract is:
 - Always provide a short summary, including a reason when the frame is unclear, empty, or excluded by the user's filter.
 - Stop each run after eight turns or 75 seconds.
 
-Structured output is validated with Zod before persistence. Low-confidence detections and invalid boxes are rejected. Proposed historical matches are rejected when established brands or models conflict; fuzzy name similarity alone does not merge objects. D1 uniqueness remains the final authority for exact fingerprints, and the client sends one frame at a time.
+Structured output is validated with Zod before persistence. Low-confidence detections and invalid boxes are rejected. Proposed historical matches are rejected when established brands or models conflict; fuzzy name similarity alone does not merge objects. D1 uniqueness remains the final authority for exact fingerprints. The client can send parallel frames within its configured limit; requests have independent cancellation, stale-source replies are ignored, and the latest completed frame stays paired with its summary.
