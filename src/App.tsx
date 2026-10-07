@@ -8,10 +8,10 @@ import {
   CircleDollarSign,
   Download,
   ExternalLink,
-  Gauge,
   History,
   ImageUp,
   LoaderCircle,
+  RotateCw,
   ScanLine,
   Search,
   Settings,
@@ -22,6 +22,12 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AgentRunHistory, AnalysisResponse, DetectedItem, HistoryPage, Stats } from "./types";
+import { cameraConstraints, cameraLabel, enableContinuousFocus } from "./camera";
+import { watchCameraPreview, type CameraPreview } from "./camera-preview";
+import { captureDimensions, waitForVideoReady } from "./capture";
+import { ScanWork } from "./scan-work";
+import { ApiError, readApiResponse } from "./api";
+import { APP_UPDATE_EVENT, installAppUpdate, updateAvailable } from "./app-updates";
 
 const EMPTY_STATS: Stats = {
   framesProcessed: 0,
@@ -30,8 +36,7 @@ const EMPTY_STATS: Stats = {
   modelCalls: 0,
   lastUpdated: null,
 };
-const DEFAULT_MAX_CONCURRENT_FRAMES = 5;
-const MAX_CONCURRENT_FRAMES_SETTING = 100;
+const EMPTY_ITEMS: DetectedItem[] = [];
 const FIND_CRITERIA_STORAGE_KEY = "yard-sale-find-criteria";
 const FIND_CRITERIA_PRESETS = [
   { label: "Vintage tees", value: "Vintage band tees worth more than $40" },
@@ -44,6 +49,9 @@ const FIND_CRITERIA_PRESETS = [
 
 type View = "scan" | "history";
 type Source = "camera" | "video" | "image";
+class CameraChangedError extends Error {
+  constructor() { super("Camera selection changed."); }
+}
 
 async function fetchStats(): Promise<Stats> {
   const response = await fetch("/api/stats");
@@ -96,25 +104,34 @@ export default function App({ children }: { children?: React.ReactNode }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const cameraPreviewRef = useRef<CameraPreview | null>(null);
+  const restoringCameraRef = useRef<Promise<string> | null>(null);
+  const cameraChooserRef = useRef<HTMLDialogElement>(null);
   const objectUrlRef = useRef<string | null>(null);
   const intervalRef = useRef<number | null>(null);
+  const firstCaptureRef = useRef<number | null>(null);
   const inFlightRef = useRef(0);
+  const scanWorkRef = useRef(new ScanWork());
+  const requestRef = useRef<AbortController | null>(null);
+  const cameraOperationRef = useRef(0);
+  const openingCameraRef = useRef<Promise<string> | null>(null);
+  const cameraWantedRef = useRef(false);
+  const scanWantedRef = useRef(false);
+  const lastFrameUrlRef = useRef<string | null>(null);
   const lastVideoTimeRef = useRef(-1);
-  const streamItemTokenRef = useRef(0);
   const streamQueueRef = useRef<DetectedItem[]>([]);
   const streamTimerRef = useRef<number | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const scanIntervalSecondsRef = useRef(2);
+  const scanIntervalSecondsRef = useRef(4);
   const [findCriteria, setFindCriteria] = useState(() =>
     window.localStorage.getItem(FIND_CRITERIA_STORAGE_KEY) ?? "",
   );
   const findCriteriaRef = useRef(findCriteria);
   const [source, setSource] = useState<Source>("camera");
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const sessionIdRef = useRef<string | null>(null);
   const [scanning, setScanning] = useState(false);
   const [inFlight, setInFlight] = useState(0);
   const [liveItems, setLiveItems] = useState<DetectedItem[]>([]);
-  const [streamItemTokens, setStreamItemTokens] = useState<Record<string, number>>({});
   const [selectedItem, setSelectedItem] = useState<DetectedItem | null>(null);
   const [selectedFrameItems, setSelectedFrameItems] = useState<DetectedItem[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -122,15 +139,17 @@ export default function App({ children }: { children?: React.ReactNode }) {
   const [cameraDevices, setCameraDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedCameraId, setSelectedCameraId] = useState("off");
   const [stillPreviewUrl, setStillPreviewUrl] = useState<string | null>(null);
-  const [snapshotFlash, setSnapshotFlash] = useState(0);
-  const [scanIntervalSeconds, setScanIntervalSeconds] = useState(2);
-  const [maxConcurrentFrames, setMaxConcurrentFrames] = useState(() => {
-    const saved = Number(window.localStorage.getItem("yard-sale-max-concurrent-frames"));
-    return Number.isInteger(saved) && saved >= 1 && saved <= MAX_CONCURRENT_FRAMES_SETTING
-      ? saved
-      : DEFAULT_MAX_CONCURRENT_FRAMES;
-  });
-  const maxConcurrentFramesRef = useRef(maxConcurrentFrames);
+  const [scanIntervalSeconds, setScanIntervalSeconds] = useState(4);
+  const [cameraState, setCameraState] = useState<"off" | "opening" | "ready" | "interrupted">("off");
+  const cameraStateRef = useRef(cameraState);
+  cameraStateRef.current = cameraState;
+  const [cameraChooserOpen, setCameraChooserOpen] = useState(false);
+  const [scanMessage, setScanMessage] = useState("Choose a camera, take a photo, or upload an image.");
+  const [lastFrameUrl, setLastFrameUrl] = useState<string | null>(null);
+  const [framePreviewOpen, setFramePreviewOpen] = useState(false);
+  const [requestStartedAt, setRequestStartedAt] = useState<number | null>(null);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [hasUpdate, setHasUpdate] = useState(updateAvailable);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [historySearch, setHistorySearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
@@ -140,6 +159,9 @@ export default function App({ children }: { children?: React.ReactNode }) {
   }, [historySearch]);
   const [deletingItemId, setDeletingItemId] = useState<string | null>(null);
   const queryClient = useQueryClient();
+  const showCameraError = (cameraError: unknown, fallback = "Camera access failed.") => {
+    if (!(cameraError instanceof CameraChangedError)) setError(cameraError instanceof Error ? cameraError.message : fallback);
+  };
   const navigate = useNavigate();
   const location = useRouterState({ select: (state) => state.location });
   const findPath = location.pathname.split("/");
@@ -148,6 +170,8 @@ export default function App({ children }: { children?: React.ReactNode }) {
   const view: View = location.pathname === "/history" || (itemId && location.search.from !== "scan")
     ? "history"
     : "scan";
+  const viewRef = useRef(view);
+  viewRef.current = view;
   const { data: stats = EMPTY_STATS } = useQuery({ queryKey: ["stats"], queryFn: fetchStats });
   const history = useHistory(debouncedSearch, view === "history");
   const savedFinds = useHistory("", settingsOpen);
@@ -158,7 +182,7 @@ export default function App({ children }: { children?: React.ReactNode }) {
     [...new Map(savedFinds.data?.pages.flatMap((page) => page.items).map((item) => [item.id, item]) ?? []).values()],
   [savedFinds.data]);
   const searchPending = historySearch.trim() !== debouncedSearch;
-  const { data: routedFrameItems = [] } = useQuery({
+  const { data: routedFrameItems = EMPTY_ITEMS } = useQuery({
     queryKey: ["frame-items", itemId],
     queryFn: () => fetchFrameItems(itemId!),
     enabled: Boolean(itemId),
@@ -178,14 +202,27 @@ export default function App({ children }: { children?: React.ReactNode }) {
   useEffect(() => {
     return () => {
       stopMedia();
-      void audioContextRef.current?.close();
+      if (lastFrameUrlRef.current) URL.revokeObjectURL(lastFrameUrlRef.current);
     };
   }, []);
 
   useEffect(() => {
-    maxConcurrentFramesRef.current = maxConcurrentFrames;
-    window.localStorage.setItem("yard-sale-max-concurrent-frames", String(maxConcurrentFrames));
-  }, [maxConcurrentFrames]);
+    const onUpdate = () => setHasUpdate(true);
+    window.addEventListener(APP_UPDATE_EVENT, onUpdate);
+    return () => window.removeEventListener(APP_UPDATE_EVENT, onUpdate);
+  }, []);
+
+  useEffect(() => {
+    if (cameraChooserOpen) cameraChooserRef.current?.showModal();
+  }, [cameraChooserOpen]);
+
+  useEffect(() => {
+    if (requestStartedAt === null) { setElapsedSeconds(0); return; }
+    const tick = () => setElapsedSeconds(Math.floor((Date.now() - requestStartedAt) / 1000));
+    tick();
+    const timer = window.setInterval(tick, 1000);
+    return () => window.clearInterval(timer);
+  }, [requestStartedAt]);
 
   const startItemStream = useCallback(() => {
     if (streamTimerRef.current !== null) return;
@@ -197,31 +234,19 @@ export default function App({ children }: { children?: React.ReactNode }) {
         return;
       }
 
-      const token = ++streamItemTokenRef.current;
-      setStreamItemTokens((current) => ({ ...current, [nextItem.id]: token }));
-      setLiveItems((current) => [nextItem, ...current.filter((item) => item.id !== nextItem.id)].slice(0, 100));
+      setLiveItems((current) => current.some((item) => item.id === nextItem.id)
+        ? current.map((item) => item.id === nextItem.id ? nextItem : item)
+        : [nextItem, ...current].slice(0, 100));
       streamTimerRef.current = window.setTimeout(revealNext, 500);
     };
 
     revealNext();
   }, []);
 
-  const getAudioContext = useCallback(() => {
-    if (!audioContextRef.current || audioContextRef.current.state === "closed") {
-      audioContextRef.current = new window.AudioContext();
-    }
-    return audioContextRef.current;
-  }, []);
-
-  const unlockAudio = useCallback(() => {
-    const context = getAudioContext();
-    if (context.state === "suspended") void context.resume();
-  }, [getAudioContext]);
-
   useEffect(() => {
     if (!itemId) {
       setSelectedItem(null);
-      setSelectedFrameItems([]);
+      setSelectedFrameItems((current) => current.length ? EMPTY_ITEMS : current);
       return;
     }
     const availableItems = [...routedFrameItems, ...liveItems, ...historyItems];
@@ -235,170 +260,272 @@ export default function App({ children }: { children?: React.ReactNode }) {
     );
   }, [historyItems, itemId, liveItems, routedFrameItems]);
 
-  const playFoundSound = useCallback(() => {
-    const context = getAudioContext();
-    if (context.state === "suspended") void context.resume();
-    const oscillator = context.createOscillator();
-    const gain = context.createGain();
-    oscillator.type = "sine";
-    oscillator.frequency.setValueAtTime(720, context.currentTime);
-    oscillator.frequency.exponentialRampToValueAtTime(1_080, context.currentTime + 0.12);
-    gain.gain.setValueAtTime(0.0001, context.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.12, context.currentTime + 0.01);
-    gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.22);
-    oscillator.connect(gain).connect(context.destination);
-    oscillator.start();
-    oscillator.stop(context.currentTime + 0.24);
-  }, [getAudioContext]);
-
-  const playSnapshotFeedback = useCallback(() => {
-    setSnapshotFlash((current) => current + 1);
-    const context = getAudioContext();
-    if (context.state === "suspended") void context.resume();
-    const oscillator = context.createOscillator();
-    const gain = context.createGain();
-    oscillator.type = "square";
-    oscillator.frequency.setValueAtTime(1_800, context.currentTime);
-    oscillator.frequency.exponentialRampToValueAtTime(700, context.currentTime + 0.07);
-    gain.gain.setValueAtTime(0.1, context.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.09);
-    oscillator.connect(gain).connect(context.destination);
-    oscillator.start();
-    oscillator.stop(context.currentTime + 0.09);
-  }, [getAudioContext]);
-
   const refreshCameras = useCallback(async () => {
-    if (!navigator.mediaDevices?.enumerateDevices) return;
+    if (!navigator.mediaDevices?.enumerateDevices) return [];
     const devices = await navigator.mediaDevices.enumerateDevices();
-    setCameraDevices(devices.filter((device) => device.kind === "videoinput"));
+    const cameras = devices.filter((device) => device.kind === "videoinput");
+    setCameraDevices(cameras);
+    return cameras;
   }, []);
 
   useEffect(() => {
-    void refreshCameras();
-    navigator.mediaDevices?.addEventListener("devicechange", refreshCameras);
-    return () => navigator.mediaDevices?.removeEventListener("devicechange", refreshCameras);
+    const refresh = () => { void refreshCameras().catch(() => {}); };
+    refresh();
+    navigator.mediaDevices?.addEventListener("devicechange", refresh);
+    return () => navigator.mediaDevices?.removeEventListener("devicechange", refresh);
   }, [refreshCameras]);
 
   const submitBlob = useCallback(
-    async (activeSessionId: string, blob: Blob) => {
-      if (inFlightRef.current >= maxConcurrentFramesRef.current) return;
+    async (activeSessionId: string, blob: Blob, reservation?: number) => {
+      const token = reservation ?? scanWorkRef.current.acquire();
+      if (token === null) {
+        setScanMessage("Still analyzing the last frame. The next frame will follow when it finishes.");
+        return;
+      }
+      if (!scanWorkRef.current.isCurrent(token)) { scanWorkRef.current.release(); return; }
       inFlightRef.current += 1;
       setInFlight(inFlightRef.current);
+      setRequestStartedAt(Date.now());
+      setScanMessage("Identifying objects and checking values…");
+      setError(null);
+      if (lastFrameUrlRef.current) URL.revokeObjectURL(lastFrameUrlRef.current);
+      lastFrameUrlRef.current = URL.createObjectURL(blob);
+      setLastFrameUrl(lastFrameUrlRef.current);
+      const controller = new AbortController();
+      requestRef.current = controller;
+      const timeout = window.setTimeout(() => controller.abort("timeout"), 90_000);
       try {
         const form = new FormData();
         form.set("sessionId", activeSessionId);
         form.set("capturedAt", new Date().toISOString());
         form.set("findCriteria", findCriteriaRef.current);
         form.set("image", blob, "frame.jpg");
-        const response = await fetch("/api/analyze", { method: "POST", body: form });
-        const body = (await response.json()) as AnalysisResponse | { error?: string };
-        if (!response.ok) throw new Error("error" in body ? body.error : "Frame analysis failed");
-
-        const result = body as AnalysisResponse;
+        const response = await fetch("/api/analyze", { method: "POST", body: form, signal: controller.signal });
+        const result = await readApiResponse<AnalysisResponse>(response);
+        if (!scanWorkRef.current.isCurrent(token)) return;
         queryClient.setQueryData(["stats"], result.stats);
+        setScanMessage(result.summary || (result.items.length ? `Identified ${result.items.length} object${result.items.length === 1 ? "" : "s"}.` : "No clear objects found. Move closer, hold steady, and try Snap."));
         if (result.items.length > 0) {
           streamQueueRef.current.push(...result.items);
           startItemStream();
-          playFoundSound();
           void refreshHistory();
         }
         setError(null);
       } catch (frameError) {
-        setError(frameError instanceof Error ? frameError.message : "Frame analysis failed");
+        if (!scanWorkRef.current.isCurrent(token)) return;
+        stopScan();
+        const message = controller.signal.aborted
+          ? "Analysis timed out. Live scanning is paused; try a clear, steady snapshot."
+          : frameError instanceof Error ? frameError.message : "Frame analysis failed";
+        setError(message);
+        setScanMessage(frameError instanceof ApiError && frameError.status === 429 ? "Usage limit reached. Scanning paused." : "Analysis failed. Try Snap again when ready.");
       } finally {
+        window.clearTimeout(timeout);
+        if (requestRef.current === controller) requestRef.current = null;
         inFlightRef.current -= 1;
         setInFlight(inFlightRef.current);
+        setRequestStartedAt(null);
+        scanWorkRef.current.release();
       }
     },
-    [playFoundSound, queryClient, refreshHistory, startItemStream],
+    [queryClient, refreshHistory, startItemStream],
   );
 
   const submitFrame = useCallback(
-    async (activeSessionId: string, onCaptured?: () => void) => {
+    async (activeSessionId: string, manual = false) => {
       const video = videoRef.current;
       const canvas = canvasRef.current;
-      if (!video || !canvas || video.readyState < 2 || inFlightRef.current >= maxConcurrentFramesRef.current) return;
-      if (video.currentTime === lastVideoTimeRef.current) return;
-      lastVideoTimeRef.current = video.currentTime;
-
-      const scale = Math.min(1, 960 / video.videoWidth);
-      canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
-      canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
-      const context = canvas.getContext("2d");
-      if (!context) return;
-      context.drawImage(video, 0, 0, canvas.width, canvas.height);
-      onCaptured?.();
-      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.76));
-      if (!blob) return;
-      await submitBlob(activeSessionId, blob);
+      if (!video || !canvas) throw new Error("The camera preview is unavailable.");
+      const token = scanWorkRef.current.acquire();
+      if (token === null) {
+        if (manual) setScanMessage("Still analyzing the last frame. Please wait before taking another snapshot.");
+        return;
+      }
+      let handedOff = false;
+      try {
+        if (streamRef.current && !cameraPreviewRef.current?.isHealthy()) {
+          throw new Error("Camera preview has stopped. Tap Restart camera before taking a snapshot.");
+        }
+        await waitForVideoReady(video);
+        if (!scanWorkRef.current.isCurrent(token)) return;
+        if (!manual && video.currentTime === lastVideoTimeRef.current) return;
+        lastVideoTimeRef.current = video.currentTime;
+        const dimensions = captureDimensions(video.videoWidth, video.videoHeight);
+        canvas.width = dimensions.width;
+        canvas.height = dimensions.height;
+        const context = canvas.getContext("2d");
+        if (!context) throw new Error("The image canvas is unavailable.");
+        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.9));
+        if (!blob) throw new Error("The camera frame could not be captured.");
+        handedOff = true;
+        await submitBlob(activeSessionId, blob, token);
+      } finally {
+        if (!handedOff) scanWorkRef.current.release();
+      }
     },
     [submitBlob],
   );
 
   const beginSession = useCallback(
-    async (nextSource: Source, sourceName?: string) => {
+    async (nextSource: Source, sourceName?: string, isCurrent: () => boolean = () => true) => {
       const id = crypto.randomUUID();
       const response = await fetch("/api/sessions", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ id, sourceType: nextSource, sourceName }),
       });
-      if (!response.ok) throw new Error("Could not start a scan session.");
+      await readApiResponse(response);
+      if (!isCurrent()) throw new CameraChangedError();
+      sessionIdRef.current = id;
       setSessionId(id);
       setSource(nextSource);
       setLiveItems([]);
+      streamQueueRef.current = [];
+      if (streamTimerRef.current !== null) window.clearTimeout(streamTimerRef.current);
+      streamTimerRef.current = null;
       return id;
     },
     [],
   );
 
-  const openCamera = async (deviceId?: string): Promise<string> => {
+  const openCamera = (deviceId?: string): Promise<string> => {
     stopMedia();
+    const operation = cameraOperationRef.current;
+    cameraWantedRef.current = true;
+    setCameraState("opening");
+    setSource("camera");
+    setError(null);
+    setScanMessage("Opening camera…");
     setStillPreviewUrl(null);
-    const videoConstraint = deviceId
-      ? { deviceId: { exact: deviceId } }
-      : { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } };
-    const stream = await navigator.mediaDevices.getUserMedia({ video: videoConstraint, audio: false });
-    streamRef.current = stream;
-    if (!videoRef.current) throw new Error("Camera preview is unavailable.");
-    videoRef.current.src = "";
-    videoRef.current.srcObject = stream;
-    videoRef.current.muted = true;
-    await videoRef.current.play();
-    const activeDeviceId = stream.getVideoTracks()[0]?.getSettings().deviceId ?? deviceId ?? "";
-    setSelectedCameraId(activeDeviceId || "off");
-    setSourceLabel(stream.getVideoTracks()[0]?.label || "Camera");
-    await refreshCameras();
-    return beginSession("camera");
+    const promise = (async () => {
+      if (!navigator.mediaDevices?.getUserMedia) throw new Error("Camera access is unavailable in this browser. Try Chrome or upload a photo.");
+      const stream = await navigator.mediaDevices.getUserMedia({ video: cameraConstraints(deviceId), audio: false });
+      if (operation !== cameraOperationRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        throw new CameraChangedError();
+      }
+      streamRef.current = stream;
+      if (!videoRef.current) throw new Error("Camera preview is unavailable.");
+      const video = videoRef.current;
+      video.removeAttribute("src");
+      video.srcObject = stream;
+      video.muted = true;
+      const track = stream.getVideoTracks()[0];
+      if (!track) throw new Error("Camera video track is unavailable.");
+      const preview = watchCameraPreview(video, stream, {
+        isVisible: () => document.visibilityState === "visible" && viewRef.current === "scan",
+        onReady: () => {
+          if (operation !== cameraOperationRef.current || openingCameraRef.current || restoringCameraRef.current) return;
+          if (cameraStateRef.current === "interrupted") setScanMessage("Camera recovered. Tap Snap or Live to continue.");
+          setCameraState("ready");
+        },
+        onInterrupted: () => {
+          if (operation === cameraOperationRef.current) cameraInterrupted();
+        },
+      });
+      cameraPreviewRef.current = preview;
+      track.onended = cameraInterrupted;
+      track.onmute = cameraInterrupted;
+      track.onunmute = () => preview.reset();
+      await video.play();
+      await preview.waitForFrame();
+      await enableContinuousFocus(track);
+      if (operation !== cameraOperationRef.current) throw new CameraChangedError();
+      const settings = track.getSettings();
+      const activeDeviceId = settings.deviceId ?? deviceId ?? "";
+      setSelectedCameraId(activeDeviceId || "off");
+      const cameras = await refreshCameras();
+      const device = cameras.find((entry) => entry.deviceId === activeDeviceId);
+      const label = device ? cameraLabel(device, cameras) : track.label || "Camera";
+      setSourceLabel(settings.width && settings.height ? `${label} · ${settings.width}×${settings.height}` : label);
+      const id = await beginSession("camera", undefined, () => operation === cameraOperationRef.current);
+      const ready = preview.isHealthy();
+      setCameraState(ready ? "ready" : "interrupted");
+      setScanMessage(ready ? "Camera ready. Hold steady and tap Snap, or start Live." : "Camera preview stopped. Tap Restart camera to reconnect.");
+      return id;
+    })().catch((cameraError: unknown) => {
+      if (operation !== cameraOperationRef.current) throw new CameraChangedError();
+      stopMedia();
+      setSelectedCameraId("off");
+      throw cameraError;
+    }).finally(() => {
+      if (openingCameraRef.current === promise) openingCameraRef.current = null;
+    });
+    openingCameraRef.current = promise;
+    return promise;
   };
 
-  const ensureCamera = async (): Promise<string> => {
-    if (streamRef.current && source === "camera" && sessionId) return sessionId;
-    return openCamera(selectedCameraId === "off" ? undefined : selectedCameraId);
+  const ensureCamera = (): Promise<string> => {
+    if (openingCameraRef.current) return openingCameraRef.current;
+    if (restoringCameraRef.current) return restoringCameraRef.current;
+    const operation = cameraOperationRef.current;
+    const promise = (async () => {
+      const video = videoRef.current;
+      // Reconnection can finish before React commits its new session state.
+      // Read the current session, so an older restore effect cannot reopen it.
+      const activeSessionId = sessionIdRef.current;
+      if (activeSessionId && source === "video" && objectUrlRef.current && video) {
+        if (video.ended) { video.currentTime = 0; lastVideoTimeRef.current = -1; }
+        if (video.paused) await video.play();
+        if (operation !== cameraOperationRef.current) throw new CameraChangedError();
+        return activeSessionId;
+      }
+      const stream = streamRef.current;
+      const preview = cameraPreviewRef.current;
+      if (stream?.getVideoTracks().some((track) => track.readyState === "live") && source === "camera" && activeSessionId && video && preview) {
+        if (preview.isHealthy()) return activeSessionId;
+        setCameraState("opening");
+        setScanMessage("Reconnecting camera…");
+        preview.reset();
+        try {
+          if (video.srcObject !== stream) video.srcObject = stream;
+          await video.play();
+          await preview.waitForFrame(3_000);
+          if (operation !== cameraOperationRef.current) throw new CameraChangedError();
+          setCameraState("ready");
+          setScanMessage("Camera ready. Hold steady and tap Snap, or start Live.");
+          return activeSessionId;
+        } catch {
+          if (operation !== cameraOperationRef.current) throw new CameraChangedError();
+          // Replaying a live but frozen stream is insufficient: release and reacquire it.
+        }
+      }
+      return openCamera(selectedCameraId === "off" ? undefined : selectedCameraId);
+    })().finally(() => {
+      if (restoringCameraRef.current === promise) restoringCameraRef.current = null;
+    });
+    restoringCameraRef.current = promise;
+    return promise;
   };
 
   const startLiveScan = (activeSessionId: string) => {
+    pauseScan();
+    scanWantedRef.current = true;
     setScanning(true);
+    const capture = () => {
+      if (document.visibilityState !== "visible" || viewRef.current !== "scan") return;
+      if (streamRef.current && !cameraPreviewRef.current?.isHealthy()) return;
+      void submitFrame(activeSessionId).catch((captureError: unknown) => {
+        stopScan();
+        setError(captureError instanceof Error ? captureError.message : "Frame capture failed.");
+      });
+    };
     intervalRef.current = window.setInterval(
-      () => void submitFrame(activeSessionId, playSnapshotFeedback),
+      capture,
       scanIntervalSecondsRef.current * 1_000,
     );
-    window.setTimeout(() => void submitFrame(activeSessionId, playSnapshotFeedback), 350);
+    firstCaptureRef.current = window.setTimeout(capture, 500);
   };
 
   const changeScanInterval = (seconds: number) => {
     scanIntervalSecondsRef.current = seconds;
     setScanIntervalSeconds(seconds);
     if (!scanning || !sessionId) return;
-    if (intervalRef.current !== null) window.clearInterval(intervalRef.current);
-    intervalRef.current = window.setInterval(
-      () => void submitFrame(sessionId, playSnapshotFeedback),
-      seconds * 1_000,
-    );
+    startLiveScan(sessionId);
   };
 
   const toggleLiveScan = async () => {
-    unlockAudio();
     try {
       if (scanning) {
         stopScan();
@@ -407,42 +534,50 @@ export default function App({ children }: { children?: React.ReactNode }) {
       const id = await ensureCamera();
       startLiveScan(id);
     } catch (cameraError) {
-      setError(cameraError instanceof Error ? cameraError.message : "Camera access failed");
+      showCameraError(cameraError);
     }
   };
 
   const takeSnapshot = async () => {
-    unlockAudio();
     try {
       const id = await ensureCamera();
-      await submitFrame(id, playSnapshotFeedback);
+      await submitFrame(id, true);
     } catch (cameraError) {
-      setError(cameraError instanceof Error ? cameraError.message : "Camera snapshot failed");
+      showCameraError(cameraError, "Camera snapshot failed.");
     }
   };
 
   const selectCamera = async (deviceId: string) => {
+    setCameraChooserOpen(false);
+    if (deviceId === "restart") deviceId = selectedCameraId === "off" ? "auto" : selectedCameraId;
     if (deviceId === "off") {
       stopMedia();
+      setSource("camera");
+      setStillPreviewUrl(null);
       setSelectedCameraId("off");
       setSessionId(null);
       setSourceLabel("Camera off");
+      setScanMessage("Camera off. Choose a camera or upload a photo.");
       return;
     }
-    const resumeScanning = scanning;
+    const resumeScanning = scanWantedRef.current;
+    const promise = openCamera(deviceId === "auto" ? undefined : deviceId);
+    const operation = cameraOperationRef.current;
     try {
-      const id = await openCamera(deviceId);
+      const id = await promise;
+      if (operation !== cameraOperationRef.current) return;
       if (resumeScanning) startLiveScan(id);
     } catch (cameraError) {
+      if (cameraError instanceof CameraChangedError) return;
       setSelectedCameraId("off");
-      setError(cameraError instanceof Error ? cameraError.message : "Camera access failed");
+      showCameraError(cameraError);
     }
   };
 
   const loadVideo = async (file: File) => {
-    unlockAudio();
     try {
       stopMedia();
+      const operation = cameraOperationRef.current;
       setSelectedCameraId("off");
       setStillPreviewUrl(null);
       const url = URL.createObjectURL(file);
@@ -453,18 +588,19 @@ export default function App({ children }: { children?: React.ReactNode }) {
       videoRef.current.muted = true;
       videoRef.current.loop = false;
       await videoRef.current.play();
+      if (operation !== cameraOperationRef.current) return;
       setSourceLabel(file.name);
-      const id = await beginSession("video", file.name);
+      const id = await beginSession("video", file.name, () => operation === cameraOperationRef.current);
       startLiveScan(id);
     } catch (videoError) {
-      setError(videoError instanceof Error ? videoError.message : "Video could not be loaded");
+      showCameraError(videoError, "Video could not be loaded.");
     }
   };
 
   const loadImage = async (file: File) => {
-    unlockAudio();
     try {
       stopMedia();
+      const operation = cameraOperationRef.current;
       setSelectedCameraId("off");
       const url = URL.createObjectURL(file);
       objectUrlRef.current = url;
@@ -472,36 +608,71 @@ export default function App({ children }: { children?: React.ReactNode }) {
       const image = new Image();
       image.src = url;
       await image.decode();
+      if (operation !== cameraOperationRef.current) return;
       const canvas = canvasRef.current;
       if (!canvas) throw new Error("Image canvas is unavailable.");
-      const scale = Math.min(1, 960 / image.naturalWidth);
-      canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
-      canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+      const dimensions = captureDimensions(image.naturalWidth, image.naturalHeight);
+      canvas.width = dimensions.width;
+      canvas.height = dimensions.height;
       const context = canvas.getContext("2d");
       if (!context) throw new Error("Image canvas is unavailable.");
       context.drawImage(image, 0, 0, canvas.width, canvas.height);
-      playSnapshotFeedback();
-      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.82));
+      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.9));
       if (!blob) throw new Error("The selected image could not be prepared.");
+      if (operation !== cameraOperationRef.current) return;
       setSourceLabel(file.name);
-      const id = await beginSession("image", file.name);
+      const id = await beginSession("image", file.name, () => operation === cameraOperationRef.current);
       await submitBlob(id, blob);
     } catch (imageError) {
-      setError(imageError instanceof Error ? imageError.message : "Image could not be loaded");
+      showCameraError(imageError, "Image could not be loaded.");
     }
   };
 
-  const stopScan = () => {
+  function pauseScan() {
     if (intervalRef.current !== null) window.clearInterval(intervalRef.current);
+    if (firstCaptureRef.current !== null) window.clearTimeout(firstCaptureRef.current);
     intervalRef.current = null;
+    firstCaptureRef.current = null;
     setScanning(false);
+  }
+
+  function stopScan() { scanWantedRef.current = false; pauseScan(); }
+
+  function cameraInterrupted() {
+    if (!cameraWantedRef.current || openingCameraRef.current || restoringCameraRef.current
+      || document.visibilityState !== "visible" || viewRef.current !== "scan") return;
+    pauseScan();
+    setCameraState("interrupted");
+    setScanMessage("Camera preview stopped. Tap Restart camera to reconnect.");
+  }
+
+  const restartCamera = () => {
+    if (openingCameraRef.current || restoringCameraRef.current) return;
+    void selectCamera(selectedCameraId === "off" ? "auto" : selectedCameraId);
   };
 
   function stopMedia() {
-    if (intervalRef.current !== null) window.clearInterval(intervalRef.current);
-    intervalRef.current = null;
-    setScanning(false);
-    streamRef.current?.getTracks().forEach((track) => track.stop());
+    stopScan();
+    cameraOperationRef.current += 1;
+    cameraWantedRef.current = false;
+    openingCameraRef.current = null;
+    restoringCameraRef.current = null;
+    cameraPreviewRef.current?.stop();
+    cameraPreviewRef.current = null;
+    setCameraState("off");
+    sessionIdRef.current = null;
+    setSessionId(null);
+    scanWorkRef.current.invalidate();
+    requestRef.current?.abort("source changed");
+    streamQueueRef.current = [];
+    if (streamTimerRef.current !== null) window.clearTimeout(streamTimerRef.current);
+    streamTimerRef.current = null;
+    streamRef.current?.getTracks().forEach((track) => {
+      track.onended = null;
+      track.onmute = null;
+      track.onunmute = null;
+      track.stop();
+    });
     streamRef.current = null;
     if (videoRef.current) {
       videoRef.current.pause();
@@ -515,14 +686,52 @@ export default function App({ children }: { children?: React.ReactNode }) {
   }
 
   const displayedItems = view === "scan" ? liveItems : historyItems;
+  const cameraOverlayVisible = source === "camera" && cameraState !== "ready";
 
   useEffect(() => {
-    if (view !== "history") return;
-    stopMedia();
-    setSelectedCameraId("off");
-    setSessionId(null);
-    setStillPreviewUrl(null);
-  }, [view]);
+    const restore = async () => {
+      if (document.visibilityState !== "visible" || view !== "scan") {
+        pauseScan();
+        cameraPreviewRef.current?.reset();
+        if (source === "video") videoRef.current?.pause();
+        return;
+      }
+      if (source === "video" && sessionId && scanWantedRef.current) {
+        try {
+          const id = await ensureCamera();
+          startLiveScan(id);
+        } catch (videoError) {
+          stopScan();
+          showCameraError(videoError, "Tap Live to resume the video.");
+        }
+        return;
+      }
+      if (!cameraWantedRef.current || source !== "camera" || openingCameraRef.current) return;
+      const resumeScanning = scanWantedRef.current;
+      try {
+        const id = await ensureCamera();
+        if (document.visibilityState === "visible" && viewRef.current === "scan" && resumeScanning) startLiveScan(id);
+      } catch (cameraError) {
+        if (cameraError instanceof CameraChangedError) return;
+        stopScan();
+        setCameraState("interrupted");
+        setError(cameraError instanceof Error ? cameraError.message : "Tap Resume camera to reconnect.");
+      }
+    };
+    const onVisibility = () => { void restore(); };
+    const onPageShow = (event: PageTransitionEvent) => { if (event.persisted) void restore(); };
+    void restore();
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("pageshow", onPageShow);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("pageshow", onPageShow);
+    };
+  }, [view, source, sessionId]);
+
+  useEffect(() => {
+    if (view === "history") void queryClient.invalidateQueries({ queryKey: ["stats"] });
+  }, [view, queryClient]);
 
   const openItem = (selected: DetectedItem, sourceView: View) => {
     const sourceItems = sourceView === "scan" ? liveItems : historyItems;
@@ -567,83 +776,55 @@ export default function App({ children }: { children?: React.ReactNode }) {
 
   return (
     <div className={`app-shell ${view === "scan" ? "scan-shell" : "history-shell"}`}>
-      {view === "scan" ? (
-        <main className="immersive-scan">
-          <section className="camera-stage">
-            <video ref={videoRef} playsInline onEnded={stopScan} />
+        <main className="immersive-scan" hidden={view !== "scan"}>
+          <header className="scan-topbar">
+            <label className="camera-select-control">
+              <Camera size={14} />
+              <select
+                value={selectedCameraId}
+                onChange={(event) => void selectCamera(event.target.value)}
+                aria-label="Select camera"
+              >
+                <option value="off">Camera off</option>
+                <option value="auto">Use rear camera</option>
+                {cameraState !== "off" && <option value="restart">Restart camera</option>}
+                {cameraDevices.map((device) => (
+                  <option key={device.deviceId} value={device.deviceId} title={device.label}>
+                    {cameraLabel(device, cameraDevices)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className={`live-state ${scanning ? "is-live" : ""}`} aria-live="polite">
+              <span />
+              {inFlight > 0 ? `Analyzing ${elapsedSeconds}s` : scanning ? "Live" : cameraState === "opening" ? "Opening" : cameraState === "interrupted" ? "Interrupted" : cameraState === "ready" ? "Ready" : "Paused"}
+            </div>
+            <button className="settings-trigger" onClick={() => setSettingsOpen(true)} aria-label="Open settings">
+              <Settings size={15} />
+            </button>
+          </header>
+          <section className={`camera-stage ${cameraOverlayVisible ? "has-camera-overlay" : ""}`}>
+            <video ref={videoRef} autoPlay muted playsInline onPause={cameraInterrupted} onError={cameraInterrupted} onEnded={() => streamRef.current ? cameraInterrupted() : stopScan()} />
             {stillPreviewUrl && <img className="still-preview" src={stillPreviewUrl} alt="Uploaded frame" />}
-            {!sessionId && (
-              <div className="camera-empty">
-                <div className="reticle"><ScanLine size={44} /></div>
-              </div>
-            )}
-            <div className="camera-shade" aria-hidden="true" />
-            {snapshotFlash > 0 && <span key={snapshotFlash} className="snapshot-flash" aria-hidden="true" />}
-
-            <header className="scan-topbar">
-              <label className="camera-select-control">
-                <Camera size={14} />
-                <select
-                  value={selectedCameraId}
-                  onChange={(event) => void selectCamera(event.target.value)}
-                  aria-label="Select camera"
-                >
-                  <option value="off">Camera off</option>
-                  {cameraDevices.map((device, index) => (
-                    <option key={device.deviceId} value={device.deviceId}>
-                      {device.label || `Camera ${index + 1}`}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <div className={`live-state ${scanning ? "is-live" : ""}`} aria-live="polite">
-                <span />
-                {scanning ? "Live" : "Paused"}
-              </div>
-              <button className="settings-trigger" onClick={() => setSettingsOpen(true)} aria-label="Open settings">
-                <Settings size={15} />
-              </button>
-            </header>
-
-            <section className="stats-ribbon" aria-label="Live processing statistics">
-              <div className="stat active-stat" title={`${inFlight} of ${maxConcurrentFrames} requests active`}>
-                {inFlight > 0 ? <LoaderCircle className="spin" size={12} /> : <Gauge size={12} />}
-                <strong>{inFlight}/{maxConcurrentFrames}</strong>
-                <span>Active</span>
-              </div>
-              <Stat label="Frames" value={stats.framesProcessed} />
-              <Stat label="Items" value={stats.itemsIdentified} />
-              <Stat label="Searches" value={stats.searchesPerformed} />
-              <Stat label="Calls" value={stats.modelCalls} />
-            </section>
-
-            {sessionId && <div className="source-caption">
-              {source === "camera" ? <Camera size={13} /> : source === "image" ? <ImageUp size={13} /> : <Video size={13} />}
-              <span>{sourceLabel}</span>
-            </div>}
-
-            <section className="live-find-stack" aria-label="Latest finds">
-              {liveItems.map((item) => (
-                <ItemCard
-                  key={`${item.id}-${streamItemTokens[item.id] ?? "stable"}`}
-                  item={item}
-                  animate
-                  overlay
-                  onSelect={(selected) => openItem(selected, "scan")}
-                />
-              ))}
-            </section>
-
-            {error && (
-              <div className="error-banner">
-                <span>{error}</span>
-                <button onClick={() => setError(null)} aria-label="Dismiss error"><X size={16} /></button>
+            {cameraOverlayVisible && (
+              <div className="camera-empty" aria-label="Camera controls">
+                <div className="reticle" aria-hidden="true"><ScanLine size={44} /></div>
+                <p>{cameraState === "interrupted" ? "Camera preview stopped" : cameraState === "opening" ? "Connecting to your camera…" : "Find out what’s in front of you."}</p>
+                {cameraState === "opening" ? <button className="camera-open-button" disabled><LoaderCircle className="spin" size={18} /> Connecting…</button>
+                  : cameraState === "interrupted" ? <>
+                    <button className="camera-open-button" onClick={restartCamera}><RotateCw size={18} /> Restart camera</button>
+                    <button className="camera-switch-button" onClick={() => setCameraChooserOpen(true)}>Select another camera</button>
+                  </> : <button className="camera-open-button" onClick={() => setCameraChooserOpen(true)}><Camera size={18} /> Select camera</button>}
               </div>
             )}
             <canvas ref={canvasRef} hidden />
           </section>
+          {error && <div className="error-banner" role="alert">
+            <span>{error}</span>
+            <button onClick={() => setError(null)} aria-label="Dismiss error"><X size={16} /></button>
+          </div>}
         </main>
-      ) : (
+      {view === "history" && (
         <main className="history-screen">
           <header className="history-heading">
             <div>
@@ -665,6 +846,16 @@ export default function App({ children }: { children?: React.ReactNode }) {
             <Stat label="Searches" value={stats.searchesPerformed} />
             <Stat label="Calls" value={stats.modelCalls} />
           </section>
+          {(lastFrameUrl || inFlight > 0) && <section className="scan-feedback" aria-label="Last scan result">
+            {lastFrameUrl && <button className="last-frame-button" onClick={() => setFramePreviewOpen(true)} aria-label="View full frame sent to AI">
+              <img src={lastFrameUrl} alt="Last frame sent to AI" />
+              <span>AI frame</span>
+            </button>}
+            <div>
+              <p role="status">{inFlight > 0 ? `Analyzing… ${elapsedSeconds}s${elapsedSeconds >= 10 ? " · Checking sources can take a little longer." : ""}` : scanMessage}</p>
+              {findCriteria && <button className="active-filter" onClick={() => updateFindCriteria("")} title="Clear the active filter">Filter: {findCriteria} <X size={12} /></button>}
+            </div>
+          </section>}
           <div className="history-search">
             <Search size={18} aria-hidden="true" />
             <input type="search" aria-label="Search all history" placeholder="Search all finds, brands, descriptions…"
@@ -702,13 +893,14 @@ export default function App({ children }: { children?: React.ReactNode }) {
         {view === "scan" && <>
           <button
             className={`dock-action ${scanning ? "is-active" : ""}`}
+            disabled={cameraState === "opening"}
             onClick={() => void toggleLiveScan()}
             aria-label={scanning ? "Stop live scanning" : "Start live scanning"}
           >
             {scanning ? <Square size={18} fill="currentColor" /> : <ScanLine size={20} />}
             <span>{scanning ? "Stop" : "Live"}</span>
           </button>
-          <button className="dock-action snapshot-action" onClick={() => void takeSnapshot()} aria-label="Take snapshot">
+          <button className="dock-action snapshot-action" disabled={cameraState === "opening" || inFlight > 0} onClick={() => void takeSnapshot()} aria-label="Take snapshot">
             <Camera size={22} />
             <span>Snap</span>
           </button>
@@ -728,9 +920,21 @@ export default function App({ children }: { children?: React.ReactNode }) {
           </label>
         </>}
         <Link to="/history" className={view === "history" ? "active" : ""} onClick={() => void refreshHistory()}>
-          <Archive /> <span>History</span>
+          <Archive /> <span>History {view === "scan" && liveItems.length > 0 && <b className="find-count">{liveItems.length}</b>}</span>
         </Link>
       </nav>
+
+      {cameraChooserOpen && <dialog className="camera-chooser" ref={cameraChooserRef} aria-labelledby="camera-chooser-title" onCancel={() => setCameraChooserOpen(false)}>
+        <header>
+          <h2 id="camera-chooser-title">Select camera</h2>
+          <button className="close-button" onClick={() => setCameraChooserOpen(false)} aria-label="Close camera selector"><X size={20} /></button>
+        </header>
+        <button className="camera-choice primary-camera-choice" aria-label="Use rear camera" onClick={() => void selectCamera("auto")}><Camera size={20} /><span>Use rear camera<small>Let your phone choose the main camera</small></span></button>
+        {cameraDevices.filter((device) => device.label).map((device) => <button className="camera-choice" key={device.deviceId} onClick={() => void selectCamera(device.deviceId)}>
+          <Camera size={20} /><span>{cameraLabel(device, cameraDevices)}</span>
+        </button>)}
+        {!cameraDevices.some((device) => device.label) && <p>Allow camera access to see all available cameras.</p>}
+      </dialog>}
 
       {settingsOpen && (
         <div className="settings-backdrop" onMouseDown={() => setSettingsOpen(false)}>
@@ -745,10 +949,16 @@ export default function App({ children }: { children?: React.ReactNode }) {
               <div>
                 <p className="eyebrow">Saved inventory</p>
                 <h2 id="settings-title">Settings</h2>
+                <p className="eyebrow">Version {__APP_VERSION__} · Reliability update</p>
               </div>
               <button onClick={() => setSettingsOpen(false)} aria-label="Close settings"><X size={18} /></button>
             </header>
             <div className="settings-find-list">
+              {hasUpdate && <button className="app-update-button" onClick={() => { stopMedia(); void installAppUpdate(); }}>Update app</button>}
+              {sessionId && <div className="settings-camera">
+                <p>{sourceLabel}</p>
+                {source === "camera" && <button className="camera-switch-button" disabled={cameraState === "opening"} onClick={restartCamera}><RotateCw size={14} /> Restart camera</button>}
+              </div>}
               <div className="settings-text-field">
                 <label htmlFor="find-criteria">Find criteria</label>
                 <textarea
@@ -773,22 +983,7 @@ export default function App({ children }: { children?: React.ReactNode }) {
                   {findCriteria && <button type="button" onClick={() => updateFindCriteria("")}>Clear</button>}
                 </div>
               </div>
-              <div className="settings-range">
-                <label htmlFor="concurrent-processing">
-                  <span>Concurrent processing</span>
-                  <strong>{maxConcurrentFrames}</strong>
-                </label>
-                <input
-                  id="concurrent-processing"
-                  type="range"
-                  min="1"
-                  max={MAX_CONCURRENT_FRAMES_SETTING}
-                  step="1"
-                  value={maxConcurrentFrames}
-                  onChange={(event) => setMaxConcurrentFrames(Number(event.target.value))}
-                />
-                <div><span>1</span><span>{MAX_CONCURRENT_FRAMES_SETTING}</span></div>
-              </div>
+              <p className="settings-note">Frames run one at a time, so answers stay in order. Live pauses while the app is in the background. The portrait preview fills your screen; the AI receives the full frame.</p>
               <div className="settings-range">
                 <label htmlFor="scan-frequency">
                   <span>Live scan frequency</span>
@@ -839,6 +1034,13 @@ export default function App({ children }: { children?: React.ReactNode }) {
           </section>
         </div>
       )}
+
+      {framePreviewOpen && lastFrameUrl && <div className="modal-backdrop" onClick={() => setFramePreviewOpen(false)}>
+        <section className="frame-preview-sheet" role="dialog" aria-modal="true" aria-label="Full frame sent to AI" onClick={(event) => event.stopPropagation()}>
+          <header><h2>Full frame sent to AI</h2><button className="close-button" onClick={() => setFramePreviewOpen(false)} aria-label="Close frame preview"><X size={20} /></button></header>
+          <img src={lastFrameUrl} alt="Full uncropped frame submitted for analysis" />
+        </section>
+      </div>}
 
       {selectedItem && (
         <ItemDetail
@@ -1113,11 +1315,11 @@ function ItemDetail({
               <a
                 className="lens-search-link"
                 data-export-exclude
-                href={`https://lens.google.com/uploadbyurl?url=${encodeURIComponent(new URL(item.thumbnailUrl, window.location.origin).href)}`}
+                href={`https://www.google.com/search?q=${encodeURIComponent([item.brand, item.model, item.name].filter(Boolean).join(" "))}`}
                 target="_blank"
                 rel="noreferrer"
               >
-                <Search size={17} /> Search full frame with Google Lens <ExternalLink size={15} />
+                <Search size={17} /> Search this item <ExternalLink size={15} />
               </a>
               {marketEvidence.length > 0 && (
                 <section className="comparables">

@@ -4,6 +4,7 @@ import { defineConfig } from "vite";
 import { VitePWA } from "vite-plugin-pwa";
 
 export default defineConfig({
+  define: { __APP_VERSION__: JSON.stringify("0.2.2") },
   server: {
     allowedHosts: ["local.wesbos.com"],
   },
@@ -11,11 +12,11 @@ export default defineConfig({
     react(),
     cloudflare(),
     VitePWA({
-      registerType: "autoUpdate",
+      registerType: "prompt",
       manifest: {
         name: "Yard Sale Gold",
         short_name: "Gold",
-        description: "Spot valuable finds with GPT-5.6 Luna.",
+        description: "Spot valuable finds with GPT-6 Luna.",
         theme_color: "#11110f",
         background_color: "#f4f0e6",
         display: "standalone",
@@ -25,7 +26,21 @@ export default defineConfig({
         ],
       },
       workbox: {
-        navigateFallback: "/index.html",
+        // Activate the worker so earlier autoUpdate clients can migrate. The new
+        // client announces an update and reloads only when the user requests it.
+        skipWaiting: true,
+        clientsClaim: true,
+        navigateFallback: null,
+        runtimeCaching: [{
+          urlPattern: ({ request }) => request.mode === "navigate",
+          handler: "NetworkFirst",
+          options: {
+            cacheName: "app-pages",
+            networkTimeoutSeconds: 5,
+            cacheableResponse: { statuses: [200] },
+            expiration: { maxEntries: 10 },
+          },
+        }],
         globPatterns: ["**/*.{js,css,html,svg,woff2}"],
       },
     }),

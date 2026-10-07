@@ -1,0 +1,8 @@
+/sw.js
+  Cache-Control: no-store
+/index.html
+  Cache-Control: no-cache
+/scan
+  Cache-Control: no-cache
+/history
+  Cache-Control: no-cache

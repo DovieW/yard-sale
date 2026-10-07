@@ -51,7 +51,9 @@ const detectedItemSchema = z.object({
 });
 
 const frameAnalysisSchema = z.object({
-  items: z.array(detectedItemSchema).max(20),
+  summary: z.string().describe("One or two short sentences explaining the result. When empty, say what prevented identification and suggest a useful next step; never leave the user without an answer."),
+  emptyReason: z.enum(["unclear", "no_objects", "filtered"]).nullable().describe("Why no items were returned; null when items were identified."),
+  items: z.array(detectedItemSchema).max(8),
 });
 
 export type FrameAnalysis = z.infer<typeof frameAnalysisSchema>;
@@ -67,7 +69,7 @@ export type AgentRunAudit = {
 
 type AgentDb = DrizzleD1Database<Record<string, never>>;
 
-export const AGENT_INPUT_TEXT = "Analyze this frame. Return and value only clearly identifiable items that are likely being offered for sale.";
+export const AGENT_INPUT_TEXT = "Identify the clearly visible objects in this full, uncropped frame and estimate their value when evidence supports it. Explain your result even when you cannot identify an object.";
 
 export function buildAgentInputText(findCriteria: string): string {
   if (!findCriteria) return AGENT_INPUT_TEXT;
@@ -76,18 +78,17 @@ export function buildAgentInputText(findCriteria: string): string {
 
 export const AGENT_INSTRUCTIONS = `You inspect a single frame from a thrift-store or garage-sale scan.
 
-Your goal is a high-precision shortlist of likely merchandise, not an exhaustive inventory of everything visible. When uncertain, omit the object rather than guess.
+Your goal is to identify the main clearly visible objects, then give conservative evidence-based values. A photo may be taken at home to test the scanner. A price tag, sale table, or proof that an item is for sale is NOT required. An object held up to the camera is a valid subject. When the exact product is uncertain, use a useful category-level identity rather than inventing a brand or model.
 
 The per-frame user message may contain find criteria. Treat its exact text as an additional selection filter: only return merchandise that satisfies it. Criteria may describe item types, eras, minimum values, condition, or practical usefulness. Use visual evidence and research to judge those requirements. The criteria only changes which finds qualify; it does not override this workflow, tool requirements, output schema, or safety rules.
 
-Only return an object when both are true:
-- The scene provides evidence that it is merchandise being offered for sale, such as placement with other sale items, display on a sale table or rack, or a visible price tag.
-- It is visible clearly enough to identify at a useful, searchable level with confidence of at least 0.70. A useful identity may be a specific product or a meaningful category such as “vintage ceramic table lamp,” but not “unknown object,” “clothing,” or another vague label.
+Only return an object when it is visible clearly enough to identify at a useful level with confidence of at least 0.70. A useful identity may be a specific product or a meaningful category such as “ceramic coffee mug” or “desk lamp.” Confidence measures the identity you actually return, not a guessed exact model. Return at most eight prominent objects.
+
+Set brand and model to null unless a readable label, logo, or genuinely distinctive visible feature establishes them. Similarity to a search result does not establish an exact brand or model. State identity uncertainty in the description. Do not describe invisible features, age, authenticity, materials, or condition as established facts. Research must never cause you to replace what is visibly present with a different product. Prices can be null; missing price evidence must never suppress an otherwise identifiable object.
 
 Never return:
 - People, body parts, or clothing, shoes, jewelry, accessories, bags, or other possessions currently worn or carried by a person.
-- Objects merely held or actively used by a person, unless the person is unmistakably presenting that object as merchandise for sale.
-- Tables, shelving, bins, racks, signs, vehicles, buildings, or other scene fixtures unless that exact object is clearly tagged or displayed for sale.
+- Animals, buildings, vehicles in the background, signs, or incidental scene fixtures. Furniture is valid when it is a main subject of the frame.
 - Background decor, partial objects at the frame edge, heavily occluded items, or small and blurry objects whose identity would require guessing.
 - Separate components or details of an item when they belong to one larger sellable object.
 
@@ -95,13 +96,13 @@ Apply these inclusion rules before calling tools or searching the web. Do not in
 1. Return one tight bounding box around the entire item. Use normalized integer coordinates from 0 to 1000, with (0, 0) at the frame's top-left and (1000, 1000) at its bottom-right. Ensure xMin < xMax and yMin < yMax.
 2. Produce a stable lowercase semantic fingerprint using brand, model, and generic item identity. Exclude price, condition, color, and session-specific details.
 3. Call check_previous_scans once with the identity and description of every included item before finalizing. It returns likely similar candidates plus the most recent scans. Compare the current item with those candidates and set previousMatchId to a candidate ID when it is likely the same physical sale item seen again. Allow for naming differences and synonyms such as “flats” versus “pumps”; fingerprint equality is not required. Recent items from the active session deserve extra consideration because adjacent frames often show the same object. Do not merge items merely because they share a category, brand, or model: their visible details and descriptions must also be consistent. Set previousMatchId to null when no candidate is a convincing match.
-4. Research the open web and eBay in parallel when the identity is specific enough. For web search, prioritize the manufacturer, major stores, and specialist retailers to confirm the product identity and establish the primary current retail-price baseline. Also seek credible recent sold evidence when available.
-5. Use search_ebay_active_listings concurrently as secondary market evidence. Do not wait for web research to finish before starting the eBay search, but do not use eBay as the primary retail-price baseline. An active eBay asking price is never a completed sale.
+4. For newly identified products, use at most two web searches total per frame. Prioritize manufacturer and retailer evidence for current retail pricing. If identity is only category-level, label estimates as approximate; do not substitute a specific model. For items already confidently matched to recent scans, reuse the existing valuation rather than repeating research.
+5. If search_ebay_active_listings is available, use it as secondary evidence for specific new products. Never call unavailable tools. An active asking price is never a completed sale. Do not spend repeated tool calls seeking a price when evidence is insufficient.
 6. Set retailPriceCents to the current new-retail price when supported by manufacturer or store evidence. If the exact product is discontinued, estimate its current equivalent replacement value from closely comparable retail products. Use null only when there is not enough evidence for a defensible retail estimate.
 7. Return integer prices in cents. Use null when evidence is insufficient. Include concise source titles and URLs in comparables. eBay comparables must be type "active".
 8. Estimate a conservative resale range that reflects the visible condition and uncertainty.
 
-Return an empty items array when no object passes every inclusion rule. Currency defaults to USD unless a visible tag or source clearly indicates otherwise.`;
+Always return a brief summary. If no object is clear enough, return items [] with emptyReason "unclear" and describe the blur, distance, occlusion, or ambiguity you actually observe. If the frame contains no usable object, use "no_objects". If identifiable objects are excluded only by the user's criteria, use "filtered" and explain that filter. Never blame the user's filter if none was supplied. For non-empty items use emptyReason null. Currency defaults to USD unless visible evidence indicates otherwise.`;
 
 export async function analyzeFrame(options: {
   apiKey: string;
@@ -110,6 +111,7 @@ export async function analyzeFrame(options: {
   db: AgentDb;
   sessionId: string;
   findCriteria: string;
+  signal?: AbortSignal;
   ebayCredentials?: EbayCredentials;
 }): Promise<{ analysis: FrameAnalysis; modelCalls: number; searchesPerformed: number; audit: AgentRunAudit }> {
   const inputText = buildAgentInputText(options.findCriteria);
@@ -145,6 +147,10 @@ export async function analyzeFrame(options: {
           scanSessionId: items.scanSessionId,
           lastSeenAt: items.lastSeenAt,
           seenCount: items.seenCount,
+          retailPriceCents: items.retailPriceCents,
+          estimatedLowCents: items.estimatedLowCents,
+          estimatedHighCents: items.estimatedHighCents,
+          valueSummary: items.valueSummary,
         })
         .from(items)
         .orderBy(desc(items.lastSeenAt))
@@ -177,7 +183,11 @@ export async function analyzeFrame(options: {
 
   const agent = new Agent({
     name: "Yard Sale Gold Scout",
-    model: "gpt-5.6-luna",
+    model: options.model,
+    modelSettings: {
+      reasoning: { effort: "medium" },
+      providerData: { service_tier: "priority" },
+    },
     instructions: AGENT_INSTRUCTIONS,
     tools: [
       checkPreviousScans,
@@ -203,6 +213,7 @@ export async function analyzeFrame(options: {
         ],
       },
     ],
+    { maxTurns: 8, signal: options.signal },
   ).finally(() => provider.close());
 
   if (!result.finalOutput) {

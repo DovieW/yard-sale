@@ -1,14 +1,11 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "yard-sale-gold",
+  "account_id": "93e4c35e8e074435f2cbcfc5c4a27916",
   "main": "./worker/index.ts",
   "compatibility_date": "2026-08-24",
-  "routes": [
-    {
-      "pattern": "yardsale.wesbos.com",
-      "custom_domain": true
-    }
-  ],
+  "workers_dev": true,
+  "preview_urls": false,
   "assets": {
     "not_found_handling": "single-page-application",
     "run_worker_first": ["/api/*"]
@@ -16,21 +13,19 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "remote": true,
       "database_name": "yard-sale-gold-db",
-      "database_id": "ef692960-193c-4fb8-82ba-5ce9f1832988",
+      "database_id": "bbcc32bb-a97e-427e-a69a-58641a7a386f",
       "migrations_dir": "./migrations"
     }
   ],
   "r2_buckets": [
     {
       "binding": "THUMBNAILS",
-      "remote": true,
       "bucket_name": "yard-sale-gold-thumbnails"
     }
   ],
   "vars": {
-    "OPENAI_MODEL": "gpt-5.6-luna"
+    "OPENAI_MODEL": "gpt-6-luna"
   },
   "observability": {
     "enabled": true,

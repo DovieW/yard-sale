@@ -1,0 +1,8 @@
+CREATE TABLE r2_budget (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  day TEXT NOT NULL DEFAULT '',
+  uploads INTEGER NOT NULL DEFAULT 0,
+  reads INTEGER NOT NULL DEFAULT 0,
+  reserved_bytes INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO r2_budget (id) VALUES (1);

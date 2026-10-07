@@ -56,6 +56,8 @@ export type HistoryPage = {
 
 export type AnalysisResponse = {
   frameId: string;
+  summary: string;
+  emptyReason: "unclear" | "no_objects" | "filtered" | null;
   items: DetectedItem[];
   stats: Stats;
   run: {

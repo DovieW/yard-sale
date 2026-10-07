@@ -5,7 +5,9 @@ import type { AgentRunEvent, AgentRunHistory, AnalysisResponse, Comparable, Dete
 import { HISTORY_PAGE_SIZE, HistoryQueryError, historyQuery } from "./history";
 import { AGENT_INSTRUCTIONS, analyzeFrame, buildAgentInputText } from "./agent";
 import { appStats, frameRuns, items, scanSessions, valuationSources } from "./db/schema";
-import { fingerprintSimilarity, normalizeFingerprint } from "./normalize";
+import { normalizeFingerprint } from "./normalize";
+import { compatibleIdentity, usableDetection } from "./detections";
+import { R2BudgetError, reserveR2 } from "./r2-budget";
 
 const MAX_FRAME_BYTES = 2_500_000;
 
@@ -71,7 +73,7 @@ export default {
 
       return Response.json({ error: "Not found" }, { status: 404 });
     } catch (error) {
-      const status = error instanceof HttpError ? error.status : error instanceof HistoryQueryError ? 400 : 500;
+      const status = error instanceof HttpError ? error.status : error instanceof R2BudgetError ? 429 : error instanceof HistoryQueryError ? 400 : 500;
       const message = error instanceof Error ? error.message : "Unexpected error";
       console.error(JSON.stringify({ message: "request failed", path: url.pathname, status, error: message }));
       return Response.json({ error: message }, { status });
@@ -135,6 +137,7 @@ async function analyzeRequest(request: Request, env: Env): Promise<Response> {
   const imageDataUrl = `data:${image.type};base64,${Buffer.from(bytes).toString("base64")}`;
   const db = drizzle(env.DB);
 
+  await reserveR2(env.DB, "upload", image.size);
   await db
     .insert(scanSessions)
     .values({ id: sessionId, sourceType: "camera", sourceName: null, startedAt: capturedAt })
@@ -151,6 +154,7 @@ async function analyzeRequest(request: Request, env: Env): Promise<Response> {
       db,
       sessionId,
       findCriteria,
+      signal: AbortSignal.any([request.signal, AbortSignal.timeout(75_000)]),
       ebayCredentials:
         env.EBAY_CLIENT_ID && env.EBAY_CLIENT_SECRET
           ? { clientId: env.EBAY_CLIENT_ID, clientSecret: env.EBAY_CLIENT_SECRET }
@@ -158,23 +162,20 @@ async function analyzeRequest(request: Request, env: Env): Promise<Response> {
     });
     const detectedItems: DetectedItem[] = [];
     const knownFingerprints = await db
-      .select({ id: items.id, fingerprint: items.fingerprint })
+      .select({ id: items.id, fingerprint: items.fingerprint, brand: items.brand, model: items.model })
       .from(items)
       .orderBy(desc(items.lastSeenAt))
       .limit(250);
 
     for (const candidate of result.analysis.items) {
+      if (!usableDetection(candidate)) continue;
       const proposedFingerprint = normalizeFingerprint(candidate.fingerprint || candidate.name);
       if (!proposedFingerprint) continue;
 
       const lunaMatch = candidate.previousMatchId
-        ? knownFingerprints.find((known) => known.id === candidate.previousMatchId)
+        ? knownFingerprints.find((known) => known.id === candidate.previousMatchId && compatibleIdentity(candidate, known))
         : undefined;
-      const fingerprintFallback = knownFingerprints
-        .map((known) => ({ ...known, score: fingerprintSimilarity(proposedFingerprint, known.fingerprint) }))
-        .filter((known) => known.score >= 0.72)
-        .sort((left, right) => right.score - left.score)[0];
-      const previousMatch = lunaMatch ?? fingerprintFallback;
+      const previousMatch = lunaMatch;
       const fingerprint = previousMatch?.fingerprint ?? proposedFingerprint;
 
       const proposedId = crypto.randomUUID();
@@ -243,7 +244,7 @@ async function analyzeRequest(request: Request, env: Env): Promise<Response> {
       const firstSeenAt = saved.firstSeenAt;
       const seenCount = saved.seenCount;
       const duplicate = proposedId !== id;
-      if (!duplicate) knownFingerprints.push({ id, fingerprint });
+      if (!duplicate) knownFingerprints.push({ id, fingerprint, brand: candidate.brand, model: candidate.model });
 
       const comparableRows = candidate.comparables.map((comparable) => ({
         id: crypto.randomUUID(),
@@ -337,6 +338,10 @@ async function analyzeRequest(request: Request, env: Env): Promise<Response> {
 
     const response: AnalysisResponse = {
       frameId,
+      summary: detectedItems.length === 0 && result.analysis.items.length > 0
+        ? "The objects were too uncertain to save reliably. Move closer and take a steady snapshot."
+        : result.analysis.summary,
+      emptyReason: detectedItems.length === 0 ? result.analysis.emptyReason ?? "unclear" : null,
       items: detectedItems,
       stats: await getStats(env),
       run: { latencyMs, modelCalls: result.modelCalls, searchesPerformed: result.searchesPerformed },
@@ -376,6 +381,9 @@ async function analyzeRequest(request: Request, env: Env): Promise<Response> {
       incrementStats(env, { frames: 1, items: 0, searches: 0, modelCalls: 0 }),
       env.THUMBNAILS.delete(thumbnailKey),
     ]);
+    if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
+      throw new HttpError(504, "Analysis took too long. Try a steady snapshot with fewer objects in view.");
+    }
     throw error;
   }
 }
@@ -555,6 +563,7 @@ async function serveThumbnail(url: URL, env: Env): Promise<Response> {
   if (!key.startsWith("frames/") || key.includes("..")) {
     throw new HttpError(400, "Invalid thumbnail key.");
   }
+  await reserveR2(env.DB, "read");
   const object = await env.THUMBNAILS.get(key);
   if (!object) throw new HttpError(404, "Thumbnail not found.");
 
