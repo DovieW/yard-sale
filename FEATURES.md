@@ -14,7 +14,8 @@ This file tracks intentionally deferred product ideas so the MVP can stay focuse
 ## Current behavior
 
 - Installable React/Vite PWA that is easy to debug in a desktop or mobile browser.
-- GPT-6 Luna through the TypeScript OpenAI Agents SDK, with Priority processing and medium reasoning.
+- GPT-6 Luna through the TypeScript OpenAI Agents SDK, with Priority/Fast processing and high reasoning.
+- Agentic OpenAI text/image search with high context and an allowance of eight hosted web actions per frame. Distinctive product identity is researched before pricing, and uncertain previous estimates are withheld from research context and rechecked.
 - Browser camera and uploaded-video frame sampling; no direct video model input.
 - Configurable parallel frame processing from 1–100 requests, defaulting to five and remembering the previous setting. Each request tracks its own cancellation and keeps its frame paired with the correct summary.
 - Unobstructed portrait camera preview, with controls and compact live processing statistics outside it. Findings, summaries, and submitted frames appear in History, alongside usage counters.

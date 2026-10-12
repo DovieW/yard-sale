@@ -332,7 +332,7 @@ export default function App({ children }: { children?: React.ReactNode }) {
       const request = requestRef.current.get(token);
       if (!request || !scanWorkRef.current.isCurrent(token)) { finishAnalysis(token); return; }
       const { controller } = request;
-      const timeout = window.setTimeout(() => controller.abort("timeout"), 90_000);
+      const timeout = window.setTimeout(() => controller.abort("timeout"), 135_000);
       try {
         if (token > latestSubmissionRef.current) {
           latestSubmissionRef.current = token;

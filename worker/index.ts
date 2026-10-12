@@ -154,7 +154,7 @@ async function analyzeRequest(request: Request, env: Env): Promise<Response> {
       db,
       sessionId,
       findCriteria,
-      signal: AbortSignal.any([request.signal, AbortSignal.timeout(75_000)]),
+      signal: AbortSignal.any([request.signal, AbortSignal.timeout(120_000)]),
       ebayCredentials:
         env.EBAY_CLIENT_ID && env.EBAY_CLIENT_SECRET
           ? { clientId: env.EBAY_CLIENT_ID, clientSecret: env.EBAY_CLIENT_SECRET }

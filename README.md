@@ -1,13 +1,13 @@
 # Yard Sale Gold
 
-An installable browser/PWA scanner that samples frames from a live camera or uploaded garage-sale footage, sends them to GPT-6 Luna through the OpenAI Agents SDK with Priority processing and medium reasoning effort, values visible items, and streams finds into a mobile-first UI.
+An installable browser/PWA scanner that samples frames from a live camera or uploaded garage-sale footage, sends them to GPT-6 Luna through the OpenAI Agents SDK with Priority/Fast processing and high reasoning effort, researches product identities and values, and streams finds into a mobile-first UI.
 
 ## Stack
 
 - React 19 + Vite + TypeScript
 - TanStack Router for URL-driven navigation and TanStack Query for server-state caching
 - Cloudflare Workers and the Cloudflare Vite plugin
-- OpenAI Agents SDK with `gpt-6-luna`, `service_tier: "priority"`, and `reasoning.effort: "medium"`
+- OpenAI Agents SDK with `gpt-6-luna`, `service_tier: "priority"`, and `reasoning.effort: "high"`; hosted OpenAI web search returns text and image references with high context.
 - Drizzle ORM + Cloudflare D1
 - Cloudflare R2 thumbnails
 - Vite PWA service worker and manifest
@@ -66,9 +66,9 @@ npm run db:migrate:local # apply migrations to local D1
 
 Each frame starts one bounded agent run. The agent:
 
-1. Identifies prominent visible objects without requiring proof they are for sale. Brand/model stay unknown unless established visually; unclear objects receive a plain explanation rather than a guess.
+1. Identifies prominent visible objects without requiring proof they are for sale. Distinctive product candidates are checked against manufacturer photos and specifications; unresolved identities receive a plain explanation and a useful next detail to inspect.
 2. Calls `check_previous_scans` against D1 for semantic fingerprint matches.
-3. Uses bounded manufacturer/retailer research and optional eBay active listings for pricing. Previous valuations can be reused, and missing price evidence does not suppress identification. Runs stop after eight turns or 75 seconds.
+3. Uses agentic OpenAI text/image search with high context, plus optional eBay active listings. Research can refine queries and follow product pages, with a cumulative allowance of eight hosted web actions across all model turns. Unresolved previous estimates are withheld from the model's history context; resolved product valuations can be reused. Missing price evidence does not suppress identification. Runs stop after eight turns or 120 seconds; the client allows 135 seconds for the response. Skipped or unfinished hosted actions are excluded from the search counter.
 4. Returns structured retail, active-listing, sold-comparable, and resale-range data.
 5. Returns normalized item coordinates and draws bounding boxes over saved frames.
 6. Persists new or repeated detections atomically. Exact fingerprints are unique; agent-proposed matches are rejected when established brands or models conflict. Uncertain detections and invalid bounding boxes are not saved. Fuzzy fingerprint overlap alone does not merge objects.
