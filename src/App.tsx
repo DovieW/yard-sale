@@ -22,7 +22,7 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AgentRunHistory, AnalysisResponse, DetectedItem, HistoryPage, Stats } from "./types";
+import type { AgentRunHistory, AgentRunSummary, AnalysisResponse, DetectedItem, HistoryPage, Stats } from "./types";
 import { cameraConstraints, cameraLabel, enableContinuousFocus } from "./camera";
 import { watchCameraPreview, type CameraPreview } from "./camera-preview";
 import { captureDimensions, waitForVideoReady } from "./capture";
@@ -51,6 +51,7 @@ const FIND_CRITERIA_PRESETS = [
 
 type View = "scan" | "history";
 type Source = "camera" | "video" | "image";
+type RerunState = { thumbnailUrl: string; pending: boolean; message: string; error: boolean; startedAt?: number };
 class CameraChangedError extends Error {
   constructor() { super("Camera selection changed."); }
 }
@@ -90,6 +91,10 @@ async function fetchAgentRun(itemId: string): Promise<AgentRunHistory> {
   const body = (await response.json()) as AgentRunHistory | { error?: string };
   if (!response.ok) throw new Error("error" in body && body.error ? body.error : "Could not load agent activity.");
   return body as AgentRunHistory;
+}
+
+async function fetchAgentRunSummary(itemId: string): Promise<AgentRunSummary> {
+  return readApiResponse<AgentRunSummary>(await fetch(`/api/agent-runs/by-item/${encodeURIComponent(itemId)}?summary=true`));
 }
 
 async function deleteFindRequest(itemId: string): Promise<void> {
@@ -138,7 +143,7 @@ export default function App({ children }: { children?: React.ReactNode }) {
   const [liveItems, setLiveItems] = useState<DetectedItem[]>([]);
   const [selectedItem, setSelectedItem] = useState<DetectedItem | null>(null);
   const [selectedFrameItems, setSelectedFrameItems] = useState<DetectedItem[]>([]);
-  const [rerunState, setRerunState] = useState<{ thumbnailUrl: string; pending: boolean; message: string; error: boolean } | null>(null);
+  const [rerunState, setRerunState] = useState<RerunState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sourceLabel, setSourceLabel] = useState("Camera ready");
   const [cameraDevices, setCameraDevices] = useState<MediaDeviceInfo[]>([]);
@@ -832,7 +837,7 @@ export default function App({ children }: { children?: React.ReactNode }) {
     rerunTokenRef.current = token;
     const { controller } = requestRef.current.get(token)!;
     const timeout = window.setTimeout(() => controller.abort("timeout"), 135_000);
-    setRerunState({ thumbnailUrl: item.thumbnailUrl, pending: true, message: "New job running. Researching the items in this image…", error: false });
+    setRerunState({ thumbnailUrl: item.thumbnailUrl, pending: true, startedAt: Date.now(), message: "New job running. Researching the items in this image…", error: false });
     try {
       const result = await rerunSavedFrame(item, controller.signal);
       if (!scanWorkRef.current.isCurrent(token)) return;
@@ -841,6 +846,7 @@ export default function App({ children }: { children?: React.ReactNode }) {
       for (const find of result.items) queryClient.setQueryData(["frame-items", find.id], result.items);
       void refreshHistory();
       void queryClient.invalidateQueries({ queryKey: ["agent-run"] });
+      void queryClient.invalidateQueries({ queryKey: ["agent-run-summary"] });
       void queryClient.invalidateQueries({ queryKey: ["frame-items"] });
 
       const current = currentDetailRef.current;
@@ -1361,13 +1367,26 @@ function ItemDetail({
   item: DetectedItem;
   frameItems: DetectedItem[];
   activityOpen: boolean;
-  rerunState: { pending: boolean; message: string; error: boolean } | null;
+  rerunState: RerunState | null;
   rerunDisabled: boolean;
   onRerun: () => void;
   onToggleActivity: () => void;
   onSelect: (item: DetectedItem) => void;
   onClose: () => void;
 }) {
+  const { data: runSummary, isPending: runTimePending } = useQuery({
+    queryKey: ["agent-run-summary", item.id, item.thumbnailUrl],
+    queryFn: () => fetchAgentRunSummary(item.id), retry: false,
+  });
+  const [rerunElapsed, setRerunElapsed] = useState(0);
+  useEffect(() => {
+    if (!rerunState?.pending || rerunState.startedAt === undefined) return;
+    const startedAt = rerunState.startedAt;
+    const tick = () => setRerunElapsed(Math.floor((Date.now() - startedAt) / 1000));
+    tick();
+    const timer = window.setInterval(tick, 1000);
+    return () => window.clearInterval(timer);
+  }, [rerunState?.pending, rerunState?.startedAt]);
   const [hoveredItemId, setHoveredItemId] = useState<string | null>(null);
   const modalRef = useRef<HTMLElement>(null);
   const [downloading, setDownloading] = useState(false);
@@ -1455,6 +1474,11 @@ function ItemDetail({
               <Bot size={17} /> {activityOpen ? "Back to find" : "Agent activity"}
             </button>
           </div>
+          <p className="run-timing" role="status">
+            {rerunState?.pending ? `Agent running · ${rerunElapsed}s`
+              : runSummary ? `Agent run: ${(runSummary.latencyMs / 1000).toFixed(1)}s · ${runSummary.model}`
+              : runTimePending ? "Loading run duration…" : "Run duration unavailable"}
+          </p>
           {rerunState && <p className={`rerun-status${rerunState.error ? " error" : ""}`} data-export-exclude role={rerunState.error ? "alert" : "status"}>{rerunState.message}</p>}
           {activityOpen ? (
             <AgentActivity itemId={item.id} />

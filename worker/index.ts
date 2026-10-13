@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { desc, eq, inArray, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import type { AgentRunEvent, AgentRunHistory, AnalysisResponse, Comparable, DetectedItem, HistoryPage, Stats } from "../src/types";
+import type { AgentRunEvent, AgentRunHistory, AgentRunSummary, AnalysisResponse, Comparable, DetectedItem, HistoryPage, Stats } from "../src/types";
 import { HISTORY_PAGE_SIZE, HistoryQueryError, historyQuery } from "./history";
 import { AGENT_INSTRUCTIONS, analyzeFrame, buildAgentInputText } from "./agent";
 import { appStats, frameRuns, items, scanSessions, valuationSources } from "./db/schema";
@@ -50,7 +50,7 @@ export default {
       if (request.method === "GET" && url.pathname.startsWith("/api/agent-runs/by-item/")) {
         const itemId = decodeURIComponent(url.pathname.slice("/api/agent-runs/by-item/".length));
         if (!itemId || itemId.includes("/")) throw new HttpError(400, "Invalid item id.");
-        return Response.json(await getAgentRunForItem(env, itemId));
+        return Response.json(await getAgentRunForItem(env, itemId, url.searchParams.get("summary") === "true"));
       }
 
       if (request.method === "GET" && url.pathname.startsWith("/api/items/")) {
@@ -463,7 +463,7 @@ async function getFrameItems(env: Env, itemId: string): Promise<DetectedItem[]> 
   return hydrateItems(env, rows);
 }
 
-async function getAgentRunForItem(env: Env, itemId: string): Promise<AgentRunHistory> {
+async function getAgentRunForItem(env: Env, itemId: string, summaryOnly = false): Promise<AgentRunHistory | AgentRunSummary> {
   const db = drizzle(env.DB);
   const selected = await db
     .select({ thumbnailKey: items.thumbnailKey })
@@ -472,6 +472,16 @@ async function getAgentRunForItem(env: Env, itemId: string): Promise<AgentRunHis
     .limit(1)
     .then((rows) => rows[0]);
   if (!selected) throw new HttpError(404, "Find not found.");
+
+  if (summaryOnly) {
+    const run = await db.select({
+      frameId: frameRuns.id, latencyMs: frameRuns.latencyMs, model: frameRuns.model,
+      status: frameRuns.status, error: frameRuns.error,
+    }).from(frameRuns).where(eq(frameRuns.thumbnailKey, selected.thumbnailKey))
+      .orderBy(desc(frameRuns.capturedAt)).limit(1).then((rows) => rows[0]);
+    if (!run) throw new HttpError(404, "Run duration was not recorded for this find.");
+    return { ...run, model: run.model ?? "Unknown model" };
+  }
 
   const run = await db
     .select()

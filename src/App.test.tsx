@@ -117,6 +117,11 @@ describe("scanner lifecycle", () => {
         return response;
       }
       if (url === "/api/stats") return Response.json(stats);
+      if (url.startsWith("/api/agent-runs/by-item/")) return Response.json({
+        frameId: saved.thumbnailUrl.endsWith("new-job") ? "new-job" : "old-job",
+        latencyMs: saved.thumbnailUrl.endsWith("new-job") ? 500 : 76685,
+        model: "gpt-6-luna", status: "completed", error: null,
+      });
       if (url.startsWith("/api/items?")) return Response.json({ items: [saved], nextCursor: null });
       if (url.startsWith("/api/items/")) return Response.json([saved]);
       return Response.json({ id: "new-session" }, { status: 201 });
@@ -129,9 +134,11 @@ describe("scanner lifecycle", () => {
     mountApp(["/finds/saved-book?from=history"]);
     let complete!: (response: Response) => void;
     analyze.mockImplementation(() => new Promise<Response>((resolve) => { complete = resolve; }));
+    await screen.findByText("Agent run: 76.7s · gpt-6-luna");
     fireEvent.click(await screen.findByRole("button", { name: "Run image again" }));
     await waitFor(() => expect(analyze).toHaveBeenCalledTimes(1));
     expect((screen.getByRole("button", { name: "Running new job…" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText("Agent running · 0s")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Running new job…" }));
     expect(analyze).toHaveBeenCalledTimes(1);
     const form = analyze.mock.calls[0][0].body as FormData;
@@ -142,6 +149,7 @@ describe("scanner lifecycle", () => {
     await act(async () => complete(Response.json({ ...result, frameId: "new-job", summary: "Fresh research complete.", emptyReason: null, items: [updated] })));
     await screen.findByRole("heading", { name: "Researched book", level: 2 });
     expect(screen.getByText("New job complete. Fresh research complete.")).toBeTruthy();
+    await screen.findByText("Agent run: 0.5s · gpt-6-luna");
     expect((screen.getByRole("button", { name: "Run image again" }) as HTMLButtonElement).disabled).toBe(false);
   });
 

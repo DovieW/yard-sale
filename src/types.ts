@@ -94,3 +94,5 @@ export type AgentRunHistory = {
   output: unknown;
   usage: unknown;
 };
+
+export type AgentRunSummary = Pick<AgentRunHistory, "frameId" | "latencyMs" | "model" | "status" | "error">;
