@@ -54,11 +54,11 @@ describe("agent Responses API integration", () => {
 
   afterEach(() => { vi.unstubAllGlobals(); setTracingDisabled(false); });
 
-  function analyze() {
+  function analyze(freshResearch = false) {
     const database = { select: () => ({ from: () => ({ orderBy: () => ({ limit: async () => history }) }) }) };
     return analyzeFrame({
       apiKey: "test-key", model: "gpt-6-luna", imageDataUrl: "data:image/jpeg;base64,AAAA",
-      db: database as unknown as Parameters<typeof analyzeFrame>[0]["db"], sessionId: "test-session", findCriteria: "",
+      db: database as unknown as Parameters<typeof analyzeFrame>[0]["db"], sessionId: "test-session", findCriteria: "", freshResearch,
     });
   }
 
@@ -108,5 +108,14 @@ describe("agent Responses API integration", () => {
     expect(context.recentCandidates[0]).toMatchObject({ id: "unresolved-chair", name: candidate.name, valuationReusable: false, retailPriceCents: null, estimatedLowCents: null, estimatedHighCents: null });
     expect(context.recentCandidates[1]).toMatchObject({ id: "resolved-chair", valuationReusable: true, retailPriceCents: 70000 });
     expect(toolResult.output).not.toContain("Old unsupported cheap-chair estimate");
+  });
+
+  it("requests fresh research for a new job even when the saved product already has a model and valuation", async () => {
+    history = [{ ...candidate, id: "resolved-chair", brand: "Named maker", model: "Named product", retailPriceCents: 70000, valueSummary: "Earlier valuation" }];
+    await analyze(true);
+    expect(requests[0].input[0].content[0].text).toContain("new analysis job requested for a saved image");
+    const toolResult = requests[1].input.find((item: { type: string }) => item.type === "function_call_output");
+    expect(JSON.parse(toolResult.output).recentCandidates[0]).toMatchObject({ id: "resolved-chair", brand: "Named maker", valuationReusable: false, retailPriceCents: null });
+    expect(toolResult.output).not.toContain("Earlier valuation");
   });
 });

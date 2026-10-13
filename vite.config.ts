@@ -4,7 +4,7 @@ import { defineConfig } from "vite";
 import { VitePWA } from "vite-plugin-pwa";
 
 export default defineConfig({
-  define: { __APP_VERSION__: JSON.stringify("0.2.6") },
+  define: { __APP_VERSION__: JSON.stringify("0.2.7") },
   server: {
     allowedHosts: ["local.wesbos.com"],
   },

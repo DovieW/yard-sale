@@ -76,8 +76,8 @@ describe("scanner lifecycle", () => {
 
   afterEach(() => { cleanup(); window.clearInterval(framePump); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
-  function mountApp() {
-    const testRouter = createRouter({ ...router.options, history: createMemoryHistory({ initialEntries: ["/scan"] }), scrollRestoration: false });
+  function mountApp(initialEntries = ["/scan"]) {
+    const testRouter = createRouter({ ...router.options, history: createMemoryHistory({ initialEntries }), scrollRestoration: false });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: Infinity } } });
     const rendered = render(<QueryClientProvider client={client}><RouterProvider router={testRouter} /></QueryClientProvider>);
     return { testRouter, ...rendered };
@@ -104,6 +104,75 @@ describe("scanner lifecycle", () => {
     await act(() => testRouter.navigate({ to: "/scan" }));
     expect(video.srcObject).toBe(stream);
     expect(getUserMedia).toHaveBeenCalledTimes(1);
+  });
+
+  function savedFrameFixture() {
+    let saved = find("saved-book");
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/api/analyze") return analyze(init);
+      if (url.startsWith("/api/thumbnails/")) {
+        const response = new Response("original image", { headers: { "content-type": "image/jpeg" } });
+        vi.spyOn(response, "blob").mockResolvedValue(new Blob(["original image"], { type: "image/jpeg" }));
+        return response;
+      }
+      if (url === "/api/stats") return Response.json(stats);
+      if (url.startsWith("/api/items?")) return Response.json({ items: [saved], nextCursor: null });
+      if (url.startsWith("/api/items/")) return Response.json([saved]);
+      return Response.json({ id: "new-session" }, { status: 201 });
+    });
+    return { update: (item: DetectedItem) => { saved = item; } };
+  }
+
+  it("creates a new job from the detail view and replaces its display with the new findings", async () => {
+    const fixture = savedFrameFixture();
+    mountApp(["/finds/saved-book?from=history"]);
+    let complete!: (response: Response) => void;
+    analyze.mockImplementation(() => new Promise<Response>((resolve) => { complete = resolve; }));
+    fireEvent.click(await screen.findByRole("button", { name: "Run image again" }));
+    await waitFor(() => expect(analyze).toHaveBeenCalledTimes(1));
+    expect((screen.getByRole("button", { name: "Running new job…" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Running new job…" }));
+    expect(analyze).toHaveBeenCalledTimes(1);
+    const form = analyze.mock.calls[0][0].body as FormData;
+    expect(form.get("sessionId")).not.toBe("session");
+    expect(form.get("freshResearch")).toBe("true");
+    const updated = { ...find("saved-book"), name: "Researched book", thumbnailUrl: "/api/thumbnails/new-job" };
+    fixture.update(updated);
+    await act(async () => complete(Response.json({ ...result, frameId: "new-job", summary: "Fresh research complete.", emptyReason: null, items: [updated] })));
+    await screen.findByRole("heading", { name: "Researched book", level: 2 });
+    expect(screen.getByText("New job complete. Fresh research complete.")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Run image again" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("leaves the earlier findings visible when a new job fails and allows a retry", async () => {
+    savedFrameFixture();
+    mountApp(["/finds/saved-book?from=history"]);
+    analyze.mockResolvedValue(Response.json({ error: "Image upload limit reached." }, { status: 429 }));
+    fireEvent.click(await screen.findByRole("button", { name: "Run image again" }));
+    await screen.findByRole("alert");
+    expect(screen.getByRole("heading", { name: "saved-book", level: 2 })).toBeTruthy();
+    expect(screen.getByText("Image upload limit reached.")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Run image again" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("keeps the new job running after closing the detail view without reopening it on completion", async () => {
+    const fixture = savedFrameFixture();
+    const { testRouter } = mountApp(["/finds/saved-book?from=history"]);
+    let complete!: (response: Response) => void;
+    analyze.mockImplementation(() => new Promise<Response>((resolve) => { complete = resolve; }));
+    fireEvent.click(await screen.findByRole("button", { name: "Run image again" }));
+    await waitFor(() => expect(analyze).toHaveBeenCalledTimes(1));
+    const signal = analyze.mock.calls[0][0].signal as AbortSignal;
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(testRouter.state.location.pathname).toBe("/history"));
+    expect(signal.aborted).toBe(false);
+    const updated = { ...find("saved-book"), name: "Researched book", thumbnailUrl: "/api/thumbnails/new-job" };
+    fixture.update(updated);
+    await act(async () => complete(Response.json({ ...result, frameId: "new-job", items: [updated] })));
+    await screen.findByRole("heading", { name: "Researched book" });
+    expect(testRouter.state.location.pathname).toBe("/history");
+    expect(screen.queryByRole("button", { name: "Run image again" })).toBeNull();
   });
 
   it("explains empty results and honors a saved limit of one", async () => {

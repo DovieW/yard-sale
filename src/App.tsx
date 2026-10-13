@@ -27,7 +27,7 @@ import { cameraConstraints, cameraLabel, enableContinuousFocus } from "./camera"
 import { watchCameraPreview, type CameraPreview } from "./camera-preview";
 import { captureDimensions, waitForVideoReady } from "./capture";
 import { DEFAULT_MAX_CONCURRENT_FRAMES, MAX_CONCURRENT_FRAMES_SETTING, mergeProcessingStats, ScanWork } from "./scan-work";
-import { ApiError, readApiResponse } from "./api";
+import { ApiError, readApiResponse, rerunSavedFrame } from "./api";
 import { APP_UPDATE_EVENT, installAppUpdate, updateAvailable } from "./app-updates";
 
 const EMPTY_STATS: Stats = {
@@ -113,6 +113,7 @@ export default function App({ children }: { children?: React.ReactNode }) {
   const firstCaptureRef = useRef<number | null>(null);
   const scanWorkRef = useRef(new ScanWork());
   const requestRef = useRef(new Map<number, { controller: AbortController; startedAt: number }>());
+  const rerunTokenRef = useRef<number | null>(null);
   const latestSubmissionRef = useRef(0);
   const latestFeedbackRef = useRef(0);
   const cameraOperationRef = useRef(0);
@@ -137,6 +138,7 @@ export default function App({ children }: { children?: React.ReactNode }) {
   const [liveItems, setLiveItems] = useState<DetectedItem[]>([]);
   const [selectedItem, setSelectedItem] = useState<DetectedItem | null>(null);
   const [selectedFrameItems, setSelectedFrameItems] = useState<DetectedItem[]>([]);
+  const [rerunState, setRerunState] = useState<{ thumbnailUrl: string; pending: boolean; message: string; error: boolean } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sourceLabel, setSourceLabel] = useState("Camera ready");
   const [cameraDevices, setCameraDevices] = useState<MediaDeviceInfo[]>([]);
@@ -176,6 +178,8 @@ export default function App({ children }: { children?: React.ReactNode }) {
   const findPath = location.pathname.split("/");
   const itemId = findPath[1] === "finds" && findPath[2] ? decodeURIComponent(findPath[2]) : null;
   const activityOpen = Boolean(itemId && findPath[3] === "activity");
+  const currentDetailRef = useRef<DetectedItem | null>(null);
+  currentDetailRef.current = itemId ? selectedItem : null;
   const view: View = location.pathname === "/history" || (itemId && location.search.from !== "scan")
     ? "history"
     : "scan";
@@ -818,6 +822,54 @@ export default function App({ children }: { children?: React.ReactNode }) {
     });
   };
 
+  const rerunFrame = async (item: DetectedItem) => {
+    if (rerunTokenRef.current !== null) return;
+    const token = reserveAnalysis();
+    if (token === null) {
+      setRerunState({ thumbnailUrl: item.thumbnailUrl, pending: false, message: "All analysis slots are busy. Try again when a job finishes.", error: true });
+      return;
+    }
+    rerunTokenRef.current = token;
+    const { controller } = requestRef.current.get(token)!;
+    const timeout = window.setTimeout(() => controller.abort("timeout"), 135_000);
+    setRerunState({ thumbnailUrl: item.thumbnailUrl, pending: true, message: "New job running. Researching the items in this image…", error: false });
+    try {
+      const result = await rerunSavedFrame(item, controller.signal);
+      if (!scanWorkRef.current.isCurrent(token)) return;
+      queryClient.setQueryData(["stats"], result.stats);
+      setLiveItems((current) => [...result.items, ...current.filter((find) => !result.items.some((updated) => updated.id === find.id))].slice(0, 100));
+      for (const find of result.items) queryClient.setQueryData(["frame-items", find.id], result.items);
+      void refreshHistory();
+      void queryClient.invalidateQueries({ queryKey: ["agent-run"] });
+      void queryClient.invalidateQueries({ queryKey: ["frame-items"] });
+
+      const current = currentDetailRef.current;
+      const nextItem = current?.thumbnailUrl === item.thumbnailUrl
+        ? result.items.find((find) => find.id === current.id) ?? result.items[0]
+        : undefined;
+      if (nextItem) {
+        setSelectedItem(nextItem);
+        setSelectedFrameItems(result.items);
+        void navigate({ to: "/finds/$itemId", params: { itemId: nextItem.id }, search: { from: view }, replace: true, resetScroll: false });
+      }
+      setRerunState({
+        thumbnailUrl: nextItem?.thumbnailUrl ?? item.thumbnailUrl, pending: false, error: false,
+        message: result.items.length ? `New job complete. ${result.summary}` : `New job complete. ${result.summary} The previous findings are unchanged.`,
+      });
+    } catch (rerunError) {
+      setRerunState({
+        thumbnailUrl: item.thumbnailUrl, pending: false, error: true,
+        message: controller.signal.aborted ? "The new job was interrupted or timed out. You can try again."
+          : rerunError instanceof Error ? rerunError.message : "Could not create a new analysis job. Try again.",
+      });
+    } finally {
+      window.clearTimeout(timeout);
+      finishAnalysis(token);
+      if (rerunTokenRef.current === token) rerunTokenRef.current = null;
+      setRerunState((current) => current?.pending ? { ...current, pending: false, message: "The new job was interrupted. You can try again.", error: true } : current);
+    }
+  };
+
   const deleteFind = async (item: DetectedItem) => {
     setDeletingItemId(item.id);
     try {
@@ -1163,6 +1215,9 @@ export default function App({ children }: { children?: React.ReactNode }) {
             );
           }}
           activityOpen={activityOpen}
+          rerunState={rerunState?.thumbnailUrl === selectedItem.thumbnailUrl ? rerunState : null}
+          rerunDisabled={Boolean(rerunState?.pending)}
+          onRerun={() => void rerunFrame(selectedItem)}
           onToggleActivity={() => {
             void navigate(
               activityOpen
@@ -1296,6 +1351,9 @@ function ItemDetail({
   item,
   frameItems,
   activityOpen,
+  rerunState,
+  rerunDisabled,
+  onRerun,
   onToggleActivity,
   onSelect,
   onClose,
@@ -1303,6 +1361,9 @@ function ItemDetail({
   item: DetectedItem;
   frameItems: DetectedItem[];
   activityOpen: boolean;
+  rerunState: { pending: boolean; message: string; error: boolean } | null;
+  rerunDisabled: boolean;
+  onRerun: () => void;
   onToggleActivity: () => void;
   onSelect: (item: DetectedItem) => void;
   onClose: () => void;
@@ -1385,9 +1446,16 @@ function ItemDetail({
               </button>
             ))}
           </div>
-          <button className="agent-activity-toggle" data-export-exclude onClick={onToggleActivity}>
-            <Bot size={17} /> {activityOpen ? "Back to find" : "Agent activity"}
-          </button>
+          <div className="detail-job-actions" data-export-exclude>
+            <button className="rerun-frame-button" onClick={onRerun} disabled={rerunDisabled} title="Create a new analysis job using this original image">
+              {rerunState?.pending ? <LoaderCircle className="spin" size={17} /> : <RotateCw size={17} />}
+              {rerunState?.pending ? "Running new job…" : "Run image again"}
+            </button>
+            <button className="agent-activity-toggle" onClick={onToggleActivity}>
+              <Bot size={17} /> {activityOpen ? "Back to find" : "Agent activity"}
+            </button>
+          </div>
+          {rerunState && <p className={`rerun-status${rerunState.error ? " error" : ""}`} data-export-exclude role={rerunState.error ? "alert" : "status"}>{rerunState.message}</p>}
           {activityOpen ? (
             <AgentActivity itemId={item.id} />
           ) : (

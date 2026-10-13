@@ -111,6 +111,7 @@ async function analyzeRequest(request: Request, env: Env): Promise<Response> {
   const sessionId = form.get("sessionId");
   const capturedAtValue = form.get("capturedAt");
   const findCriteriaValue = form.get("findCriteria");
+  const freshResearchValue = form.get("freshResearch");
 
   if (!(image instanceof File) || !image.type.startsWith("image/")) {
     throw new HttpError(400, "A JPEG or WebP frame is required.");
@@ -124,6 +125,10 @@ async function analyzeRequest(request: Request, env: Env): Promise<Response> {
   if (findCriteriaValue !== null && typeof findCriteriaValue !== "string") {
     throw new HttpError(400, "Find criteria must be text.");
   }
+  if (freshResearchValue !== null && freshResearchValue !== "true" && freshResearchValue !== "false") {
+    throw new HttpError(400, "Fresh research must be true or false.");
+  }
+  const freshResearch = freshResearchValue === "true";
   const findCriteria = (findCriteriaValue ?? "").slice(0, 1000);
 
   const capturedAt =
@@ -154,6 +159,7 @@ async function analyzeRequest(request: Request, env: Env): Promise<Response> {
       db,
       sessionId,
       findCriteria,
+      freshResearch,
       signal: AbortSignal.any([request.signal, AbortSignal.timeout(120_000)]),
       ebayCredentials:
         env.EBAY_CLIENT_ID && env.EBAY_CLIENT_SECRET
@@ -367,7 +373,7 @@ async function analyzeRequest(request: Request, env: Env): Promise<Response> {
         inputJson: JSON.stringify({
           role: "user",
           content: [
-            { type: "input_text", text: buildAgentInputText(findCriteria) },
+            { type: "input_text", text: buildAgentInputText(findCriteria, freshResearch) },
             { type: "input_image", image: "[frame stored in R2]", detail: "high" },
           ],
         }),

@@ -76,6 +76,8 @@ Each frame starts one bounded agent run. The agent:
 
 History reports cumulative frames processed, items identified, searches performed, and underlying model calls. See [FEATURES.md](./FEATURES.md) for find tracking, natural-language filters, eBay integration, and batch processing.
 
+In a find's detail view, **Run image again** creates a new job using the same original saved image and fresh identity/pricing research. It gets its own scan session, frame ID, and activity record; the earlier job record is retained. New results refresh the find's detail view and History. Closing the detail view does not cancel the job. The normal parallel-processing and R2 read/upload limits still apply.
+
 ## Cloud deployment
 
 This instance uses the `yard-sale-gold` Worker, `yard-sale-gold-db` D1 database, and `yard-sale-gold-thumbnails` R2 bucket in Dovie's Cloudflare account. Its intended URL is `https://yard-sale-gold.dovieweinstock.workers.dev`.

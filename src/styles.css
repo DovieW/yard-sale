@@ -220,6 +220,12 @@ button:focus-visible, a:focus-visible, summary:focus-visible, select:focus-visib
 .frame-find-list strong { font: 700 13px/1.15 "Space Grotesk", sans-serif; }
 .frame-find-list b { color: var(--green); font-size: 11px; }
 .agent-activity-toggle { width: 100%; min-height: 42px; display: flex; align-items: center; justify-content: center; gap: 7px; margin: -7px 0 18px; color: var(--ink); background: #fff6d8; border: 1px solid #d7bb68; border-radius: 11px; font-size: 12px; font-weight: 700; cursor: pointer; }
+.detail-job-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: -7px 0 18px; }
+.detail-job-actions .agent-activity-toggle { flex: 1 1 140px; width: auto; margin: 0; }
+.rerun-frame-button { flex: 1 1 140px; min-height: 44px; display: flex; align-items: center; justify-content: center; gap: 7px; padding: 8px 12px; color: #f4f5ed; background: #242a21; border: 1px solid #48513f; border-radius: 11px; font-size: 12px; font-weight: 700; cursor: pointer; }
+.rerun-frame-button:disabled { opacity: .65; cursor: wait; }
+.rerun-status { margin: -6px 0 18px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.rerun-status.error { color: #ffb2a6; }
 .agent-activity { display: grid; gap: 12px; }
 .agent-activity > header { display: grid; grid-template-columns: 1.6fr repeat(3,1fr); overflow: hidden; color: white; background: var(--ink); border-radius: 13px; }
 .agent-activity > header div { min-width: 0; display: grid; gap: 2px; padding: 10px; border-right: 1px solid rgba(255,255,255,.12); }

@@ -22,6 +22,7 @@ This file tracks intentionally deferred product ideas so the MVP can stay focuse
 - Brief capture feedback inside the camera frame for manual snaps, suppressed in Live mode. Reduced motion uses a static outline; no sound effects or decorative gradients.
 - Optional natural-language find criteria in Settings; uncertain detections are not saved.
 - Value records can include retail price, active listings, and sold comparables.
+- “Run image again” in a find's detail view creates a new analysis job from the unchanged saved image, requests fresh research, and refreshes its findings and agent activity. The earlier job record is retained; retries obey the same processing and R2 limits.
 - Dedupe within the active scan and across historical scans.
 - D1 stores metadata; R2 stores thumbnails.
 - Cloudflare Access protects the deployed app for an email allowlist; authorized users share inventory and deletion permissions.

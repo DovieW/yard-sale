@@ -72,9 +72,11 @@ type AgentDb = DrizzleD1Database<Record<string, never>>;
 
 export const AGENT_INPUT_TEXT = "Identify the actual products among the clearly visible objects in this full, uncropped frame. Research distinctive or unresolved items before estimating their value. Explain remaining identity or price uncertainty and the useful next detail to check.";
 
-export function buildAgentInputText(findCriteria: string): string {
-  if (!findCriteria) return AGENT_INPUT_TEXT;
-  return `${AGENT_INPUT_TEXT}\n\nOnly return finds that match this user-supplied selection criteria:\n<find_criteria>\n${findCriteria}\n</find_criteria>`;
+export function buildAgentInputText(findCriteria: string, freshResearch = false): string {
+  let text = AGENT_INPUT_TEXT;
+  if (findCriteria) text += `\n\nOnly return finds that match this user-supplied selection criteria:\n<find_criteria>\n${findCriteria}\n</find_criteria>`;
+  if (freshResearch) text += "\n\nThis is a new analysis job requested for a saved image. Re-evaluate the product identities and pricing with fresh web research. Use previous scans to match physical items, but do not reuse their earlier valuations as the result of this job.";
+  return text;
 }
 
 export const AGENT_INSTRUCTIONS = `You inspect a single frame from a thrift-store or garage-sale scan.
@@ -113,10 +115,11 @@ export async function analyzeFrame(options: {
   db: AgentDb;
   sessionId: string;
   findCriteria: string;
+  freshResearch?: boolean;
   signal?: AbortSignal;
   ebayCredentials?: EbayCredentials;
 }): Promise<{ analysis: FrameAnalysis; modelCalls: number; searchesPerformed: number; audit: AgentRunAudit }> {
-  const inputText = buildAgentInputText(options.findCriteria);
+  const inputText = buildAgentInputText(options.findCriteria, options.freshResearch);
   const checkPreviousScans = tool({
     name: "check_previous_scans",
     description:
@@ -159,13 +162,15 @@ export async function analyzeFrame(options: {
         .limit(120);
 
       const recentItems = savedItems.map((saved) => {
-        const valuationReusable = Boolean(saved.brand && saved.model);
+        const valuationReusable = !options.freshResearch && Boolean(saved.brand && saved.model);
         return {
           ...saved,
           valuationReusable,
           ...(valuationReusable ? {} : {
             retailPriceCents: null, estimatedLowCents: null, estimatedHighCents: null,
-            valueSummary: "Earlier product identity and pricing were unresolved. Research the current frame; do not reuse the earlier estimate.",
+            valueSummary: options.freshResearch
+              ? "Fresh research was requested for this image. Re-evaluate this product and its pricing instead of reusing the earlier estimate."
+              : "Earlier product identity and pricing were unresolved. Research the current frame; do not reuse the earlier estimate.",
           }),
         };
       });
